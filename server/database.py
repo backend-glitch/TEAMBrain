@@ -22,8 +22,32 @@ def create_tables(connection: sqlite3.Connection) -> None:
             body TEXT NOT NULL,
             contract_version INTEGER NOT NULL,
             "read" INTEGER NOT NULL DEFAULT 0,
+            proposal_id TEXT,
+            status TEXT CHECK (status IS NULL OR status IN ('open', 'accepted', 'escalated')),
             created_at TEXT NOT NULL
         );
         """
+    )
+    message_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(messages)")
+    }
+    if "proposal_id" not in message_columns:
+        connection.execute("ALTER TABLE messages ADD COLUMN proposal_id TEXT")
+    if "status" not in message_columns:
+        connection.execute(
+            "ALTER TABLE messages ADD COLUMN status TEXT "
+            "CHECK (status IS NULL OR status IN ('open', 'accepted', 'escalated'))"
+        )
+
+    # Existing standalone proposals become roots of their own threads.
+    connection.execute(
+        "UPDATE messages SET proposal_id = id WHERE type = 'proposal' AND proposal_id IS NULL"
+    )
+    connection.execute(
+        "UPDATE messages SET status = 'open' "
+        "WHERE type = 'proposal' AND proposal_id = id AND status IS NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_proposal_id ON messages(proposal_id)"
     )
     connection.commit()

@@ -5,11 +5,12 @@ try:
 except ImportError:  # Compatibility with MCP SDK v1.
     from mcp.server.fastmcp import FastMCP as MCPServer
 
-from server.messages import check_inbox, post_message, read_contract
+from server.messages import check_inbox, get_thread, post_message, read_contract
 
 mcp = MCPServer("TeamBrain")
 mcp.tool()(post_message)
 mcp.tool()(check_inbox)
+mcp.tool()(get_thread)
 mcp.tool()(read_contract)
 
 
