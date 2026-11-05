@@ -137,26 +137,38 @@ def check_inbox(
     return _messages_with_contract_warnings(rows, latest_version)
 
 
-def mark_read(message_ids: list[str]) -> dict[str, list[str]]:
-    """Mark the supplied unread messages as read and return the changed IDs."""
+def mark_read(
+    message_ids: list[str], to_role: str | None = None
+) -> dict[str, list[str]]:
+    """Mark supplied unread messages as read, optionally scoped to a recipient role."""
     if not message_ids:
         return {"marked_read": []}
 
     placeholders = ", ".join("?" for _ in message_ids)
+    role_filter = " AND to_role = ?" if to_role is not None else ""
+    parameters: list[str] = list(message_ids)
+    if to_role is not None:
+        parameters.append(to_role)
     with sqlite3.connect(DB_PATH) as connection:
         create_tables(connection)
         unread_ids = [
             row[0]
             for row in connection.execute(
-                f'SELECT id FROM messages WHERE id IN ({placeholders}) AND "read" = 0 ORDER BY id',
-                message_ids,
+                f'SELECT id FROM messages WHERE id IN ({placeholders}) AND "read" = 0'
+                f"{role_filter} ORDER BY id",
+                parameters,
             ).fetchall()
         ]
         if unread_ids:
             unread_placeholders = ", ".join("?" for _ in unread_ids)
+            update_role_filter = " AND to_role = ?" if to_role is not None else ""
+            update_parameters: list[str] = list(unread_ids)
+            if to_role is not None:
+                update_parameters.append(to_role)
             connection.execute(
-                f'UPDATE messages SET "read" = 1 WHERE id IN ({unread_placeholders})',
-                unread_ids,
+                f'UPDATE messages SET "read" = 1 WHERE id IN ({unread_placeholders})'
+                f"{update_role_filter}",
+                update_parameters,
             )
 
     return {"marked_read": unread_ids}

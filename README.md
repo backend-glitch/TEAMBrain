@@ -17,7 +17,7 @@ Proposal statuses are `open`, `accepted`, `escalated`, and `rejected`.
 ## MCP tools
 - `post_message`: validates and stores a typed message for a role with its `contract_version`. An optional `proposal_id` links a reply to an original proposal; standalone proposals start as their own thread root.
 - `check_inbox`: returns unread messages for a role and marks them read; set `peek` to `true` to leave them unread.
-- `mark_read`: marks the supplied message IDs as read and returns the IDs changed.
+- `mark_read`: marks the supplied message IDs as read and returns the IDs changed. In HTTP mode, it only marks messages addressed to the authenticated token's role.
 - `read_contract`: returns the latest contract content and version.
 - `write_contract`: stores new contract content at the next version number.
 - `get_thread`: returns a proposal and its linked messages in chronological order.

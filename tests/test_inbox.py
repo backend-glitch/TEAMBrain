@@ -69,3 +69,22 @@ def test_mark_read_marks_only_requested_unread_messages(tmp_path, monkeypatch):
         "marked_read": [second["id"]]
     }
     assert messages.check_inbox("frontend", peek=True) == []
+
+
+def test_mark_read_can_be_scoped_to_recipient_role(tmp_path, monkeypatch):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
+    frontend_message = messages.post_message(
+        "backend", "frontend", "request", "For frontend", 1
+    )
+    backend_message = messages.post_message(
+        "frontend", "backend", "request", "For backend", 1
+    )
+
+    result = messages.mark_read(
+        [frontend_message["id"], backend_message["id"]], to_role="frontend"
+    )
+
+    assert result == {"marked_read": [frontend_message["id"]]}
+    assert messages.check_inbox("frontend", peek=True) == []
+    backend_inbox = messages.check_inbox("backend", peek=True)
+    assert [message["id"] for message in backend_inbox] == [backend_message["id"]]

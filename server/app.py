@@ -12,7 +12,7 @@ from server.messages import (
     get_thread,
     human_decision,
     list_escalated,
-    mark_read,
+    mark_read as mark_read_messages,
     post_message,
     read_contract,
     write_contract,
@@ -51,12 +51,20 @@ def check_inbox_tool(
     return check_inbox(to_role=authenticated_role or to_role, peek=peek)
 
 
+def mark_read_tool(message_ids: list[str]) -> dict[str, list[str]]:
+    """Mark only messages addressed to the authenticated role as read."""
+    authenticated_role = current_role.get()
+    if authenticated_role is None:
+        raise PermissionError("mark_read requires an authenticated role")
+    return mark_read_messages(message_ids, to_role=authenticated_role)
+
+
 mcp.tool(name="post_message")(post_message_tool)
 mcp.tool(name="check_inbox")(check_inbox_tool)
 mcp.tool()(get_thread)
 mcp.tool()(list_escalated)
 mcp.tool()(human_decision)
-mcp.tool()(mark_read)
+mcp.tool(name="mark_read")(mark_read_tool)
 mcp.tool()(read_contract)
 mcp.tool()(write_contract)
 

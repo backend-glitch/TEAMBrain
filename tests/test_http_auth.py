@@ -113,3 +113,34 @@ def test_check_inbox_uses_authenticated_role_instead_of_client_role(monkeypatch)
         current_role.reset(role_token)
 
     assert requested == {"to_role": "frontend", "peek": True}
+
+
+def test_mark_read_tool_only_marks_messages_for_authenticated_role(tmp_path, monkeypatch):
+    from server import messages
+
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
+    frontend_message = messages.post_message(
+        "backend", "frontend", "request", "For frontend", 1
+    )
+    backend_message = messages.post_message(
+        "frontend", "backend", "request", "For backend", 1
+    )
+    role_token = current_role.set("frontend")
+    try:
+        result = app_module.mark_read_tool(
+            [frontend_message["id"], backend_message["id"]]
+        )
+    finally:
+        current_role.reset(role_token)
+
+    assert result == {"marked_read": [frontend_message["id"]]}
+    assert messages.check_inbox("backend", peek=True)[0]["id"] == backend_message["id"]
+
+
+def test_mark_read_tool_requires_an_authenticated_role():
+    try:
+        app_module.mark_read_tool(["message-id"])
+    except PermissionError as error:
+        assert str(error) == "mark_read requires an authenticated role"
+    else:
+        raise AssertionError("mark_read must reject calls without an authenticated role")
