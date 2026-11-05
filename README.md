@@ -8,15 +8,22 @@ A shared MCP server that every AI connects to. It stores the API contract, desig
 
 ## How AIs resolve conflicts
 1. An AI posts a `proposal` or `request`.
-2. If it breaks nobody's work, it's auto-accepted.
-3. If it does, the affected AI replies with an `objection`.
-4. After 3 rounds with no agreement, humans get a summary and decide.
+2. Teammates discuss it with linked messages in the proposal thread.
+3. An `accept` message marks the proposal accepted. Three objections without an accept escalate it for human review.
+4. A human accepts or rejects an escalated proposal with `human_decision`.
 
-## MVP scope
-Tools:
-- `read_contract`: returns the current contract and version
-- `post_message`: sends a typed message to a role
-- `check_inbox`: returns unread messages for a role
+Proposal statuses are `open`, `accepted`, `escalated`, and `rejected`.
+
+## MCP tools
+- `post_message`: validates and stores a typed message for a role with its `contract_version`. An optional `proposal_id` links a reply to an original proposal; standalone proposals start as their own thread root.
+- `check_inbox`: returns unread messages for a role and marks them read.
+- `read_contract`: returns the latest contract content and version.
+- `write_contract`: stores new contract content at the next version number.
+- `get_thread`: returns a proposal and its linked messages in chronological order.
+- `list_escalated`: returns unresolved escalated proposals with concise position summaries grouped by role.
+- `human_decision`: accepts or rejects an escalated proposal and can store a decision note. It returns a clear error for an unknown proposal or one that is not escalated.
+
+`check_inbox` and `get_thread` include a `warning` field on each message whose `contract_version` is older than the latest contract version.
 
 Storage: SQLite (tables: contracts, messages).
 

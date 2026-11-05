@@ -63,14 +63,42 @@ def test_human_decision_resolves_escalated_proposal(
     assert messages.list_escalated() == []
 
 
-def test_human_decision_only_accepts_escalated_proposals(tmp_path, monkeypatch):
+def test_human_decision_returns_clear_error_for_accepted_proposal(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
     proposal = messages.post_message(
         "frontend", "backend", "proposal", "Add cursor pagination", 2
     )
+    messages.post_message(
+        "backend",
+        "frontend",
+        "accept",
+        "Agreed",
+        2,
+        proposal_id=proposal["id"],
+    )
 
-    with pytest.raises(ValueError, match="Only an escalated proposal"):
-        messages.human_decision(proposal["id"], "accept")
+    result = messages.human_decision(proposal["id"], "reject")
+
+    assert result == {
+        "proposal_id": proposal["id"],
+        "error": "Proposal is 'accepted', only 'escalated' proposals can receive a human decision.",
+    }
+    assert messages.get_thread(proposal["id"])[0]["status"] == "accepted"
+
+
+def test_human_decision_returns_clear_error_for_unknown_proposal(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
+
+    result = messages.human_decision("missing-proposal", "reject")
+
+    assert result == {
+        "proposal_id": "missing-proposal",
+        "error": "Unknown proposal_id 'missing-proposal'.",
+    }
 
 
 def test_human_decision_persists_note(tmp_path, monkeypatch):

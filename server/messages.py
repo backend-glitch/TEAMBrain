@@ -267,8 +267,19 @@ def human_decision(
             "SELECT status FROM messages WHERE id = ? AND type = 'proposal'",
             (proposal_id,),
         ).fetchone()
-        if proposal is None or proposal[0] != "escalated":
-            raise ValueError("Only an escalated proposal can receive a human decision")
+        if proposal is None:
+            return {
+                "proposal_id": proposal_id,
+                "error": f"Unknown proposal_id '{proposal_id}'.",
+            }
+        if proposal[0] != "escalated":
+            return {
+                "proposal_id": proposal_id,
+                "error": (
+                    f"Proposal is '{proposal[0]}', only 'escalated' proposals "
+                    "can receive a human decision."
+                ),
+            }
         connection.execute(
             "UPDATE messages SET status = ?, decision_note = ? WHERE id = ?",
             (status, note, proposal_id),
