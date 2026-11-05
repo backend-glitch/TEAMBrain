@@ -26,35 +26,45 @@ def configured_tokens() -> dict[str, str]:
 
 
 class BearerRoleMiddleware:
-    """Require a configured bearer token and bind its role to the request."""
+    """Authenticate dashboard and MCP routes with separate bearer tokens."""
 
-    def __init__(self, app: ASGIApp, tokens: dict[str, str]):
+    DASHBOARD_PATHS = {"/dashboard", "/api/dashboard"}
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        tokens: dict[str, str],
+        dashboard_token: str | None = None,
+    ):
         self.app = app
         self.tokens = tokens
+        self.dashboard_token = dashboard_token
+        if dashboard_token and dashboard_token in tokens.values():
+            raise ValueError("TEAMBRAIN_DASHBOARD_TOKEN must be distinct from role tokens")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        authorization = next(
-            (
-                value.decode("latin-1")
-                for key, value in scope["headers"]
-                if key.lower() == b"authorization"
-            ),
-            "",
-        )
-        scheme, _, presented_token = authorization.partition(" ")
+        if scope.get("path") in self.DASHBOARD_PATHS:
+            presented = self._bearer_token(scope)
+            if not self.dashboard_token or not self._matches(
+                presented, self.dashboard_token
+            ):
+                await PlainTextResponse("Unauthorized", status_code=401)(
+                    scope, receive, send
+                )
+                return
+            await self.app(scope, receive, send)
+            return
+
+        presented_token = self._bearer_token(scope)
         role = next(
             (
                 candidate_role
                 for candidate_role, expected_token in self.tokens.items()
-                if scheme.lower() == "bearer"
-                and presented_token
-                and hmac.compare_digest(
-                    presented_token.encode("utf-8"), expected_token.encode("utf-8")
-                )
+                if self._matches(presented_token, expected_token)
             ),
             None,
         )
@@ -68,3 +78,25 @@ class BearerRoleMiddleware:
             await self.app(scope, receive, send)
         finally:
             current_role.reset(token)
+
+    @staticmethod
+    def _bearer_token(scope: Scope) -> str | None:
+        authorization = next(
+            (
+                value.decode("latin-1")
+                for key, value in scope["headers"]
+                if key.lower() == b"authorization"
+            ),
+            "",
+        )
+        scheme, _, token = authorization.partition(" ")
+        return token if scheme.lower() == "bearer" and token else None
+
+    @staticmethod
+    def _matches(presented: str | None, expected: str) -> bool:
+        return bool(
+            presented
+            and hmac.compare_digest(
+                presented.encode("utf-8"), expected.encode("utf-8")
+            )
+        )

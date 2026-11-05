@@ -37,6 +37,8 @@ From the project root, start the server with the project's Python environment:
 
 HTTP mode requires bearer tokens configured through `TEAMBRAIN_TOKEN_UIUX`, `TEAMBRAIN_TOKEN_FRONTEND`, and `TEAMBRAIN_TOKEN_BACKEND`. Each configured token authenticates as its matching role. Requests without a valid token receive HTTP 401. For HTTP calls, `post_message` uses the token's role as `from_role`, and `check_inbox` reads only that role's inbox. Optional `TEAMBRAIN_ALLOWED_HOSTS` accepts comma-separated hostnames for tunnel access; DNS rebinding protection stays enabled.
 
+The read-only dashboard is available at `http://127.0.0.1:8000/dashboard`, with JSON at `/api/dashboard`. Both routes require a separate `TEAMBRAIN_DASHBOARD_TOKEN`; a role token is not accepted there. The page stores its entered dashboard token in session storage and sends it in an Authorization header. To satisfy route authentication, the initial `/dashboard` request also needs an Authorization bearer header from a compatible client.
+
 ## Later
 - Dashboard showing each AI's activity
 - One-command localhost sharing via cloudflared

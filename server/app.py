@@ -1,6 +1,7 @@
 """TeamBrain MCP server entry point."""
 
 import argparse
+import os
 
 try:
     from mcp.server import MCPServer
@@ -19,6 +20,7 @@ from server.messages import (
 )
 from server.http_auth import BearerRoleMiddleware, configured_tokens, current_role
 from server.http_security import transport_security_settings
+from server.dashboard import dashboard_api, dashboard_page
 
 mcp = MCPServer("TeamBrain")
 
@@ -69,6 +71,23 @@ mcp.tool()(read_contract)
 mcp.tool()(write_contract)
 
 
+def create_http_app():
+    """Build the authenticated Streamable HTTP app with read-only dashboard routes."""
+    app = mcp.streamable_http_app(
+        host="127.0.0.1",
+        streamable_http_path="/mcp",
+        transport_security=transport_security_settings(),
+    )
+    app.add_route("/dashboard", dashboard_page, methods=["GET"])
+    app.add_route("/api/dashboard", dashboard_api, methods=["GET"])
+    app.add_middleware(
+        BearerRoleMiddleware,
+        tokens=configured_tokens(),
+        dashboard_token=os.environ.get("TEAMBRAIN_DASHBOARD_TOKEN"),
+    )
+    return app
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the TeamBrain MCP server.")
     mode = parser.add_mutually_exclusive_group()
@@ -87,12 +106,6 @@ if __name__ == "__main__":
     if args.http:
         import uvicorn
 
-        app = mcp.streamable_http_app(
-            host="127.0.0.1",
-            streamable_http_path="/mcp",
-            transport_security=transport_security_settings(),
-        )
-        app.add_middleware(BearerRoleMiddleware, tokens=configured_tokens())
-        uvicorn.run(app, host="127.0.0.1", port=8000)
+        uvicorn.run(create_http_app(), host="127.0.0.1", port=8000)
     else:
         mcp.run(transport="stdio")
