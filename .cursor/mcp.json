@@ -1,13 +1,9 @@
 {
   "mcpServers": {
     "teambrain": {
-      "type": "stdio",
-      "command": "C:\\Users\\Arjun Verma\\Desktop\\brainx\\TEAMBrain\\.venv-win\\Scripts\\python.exe",
-      "args": [
-        "C:\\Users\\Arjun Verma\\Desktop\\brainx\\TEAMBrain\\server\\app.py"
-      ],
-      "env": {
-        "PYTHONPATH": "C:\\Users\\Arjun Verma\\Desktop\\brainx\\TEAMBrain"
+      "url": "https://able-attributes-suggesting-usr.trycloudflare.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:TEAMBRAIN_TOKEN_BACKEND}"
       }
     }
   }

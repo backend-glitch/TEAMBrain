@@ -37,3 +37,35 @@ def test_check_inbox_warns_when_message_uses_older_contract(tmp_path, monkeypatc
     assert inbox[0]["warning"] == (
         "Message uses contract version 1; latest contract version is 2."
     )
+
+
+def test_check_inbox_peek_leaves_messages_unread(tmp_path, monkeypatch):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
+    first = messages.post_message("backend", "frontend", "request", "First", 1)
+
+    peeked = messages.check_inbox("frontend", peek=True)
+    peeked_again = messages.check_inbox("frontend", peek=True)
+
+    assert [message["id"] for message in peeked] == [first["id"]]
+    assert [message["id"] for message in peeked_again] == [first["id"]]
+    with sqlite3.connect(messages.DB_PATH) as connection:
+        read_state = connection.execute(
+            'SELECT "read" FROM messages WHERE id = ?', (first["id"],)
+        ).fetchone()[0]
+    assert read_state == 0
+
+
+def test_mark_read_marks_only_requested_unread_messages(tmp_path, monkeypatch):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
+    first = messages.post_message("backend", "frontend", "request", "First", 1)
+    second = messages.post_message("design", "frontend", "request", "Second", 1)
+
+    result = messages.mark_read([first["id"], "missing-id"])
+
+    assert result == {"marked_read": [first["id"]]}
+    inbox = messages.check_inbox("frontend", peek=True)
+    assert [message["id"] for message in inbox] == [second["id"]]
+    assert messages.mark_read([first["id"], second["id"]]) == {
+        "marked_read": [second["id"]]
+    }
+    assert messages.check_inbox("frontend", peek=True) == []

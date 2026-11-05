@@ -16,7 +16,8 @@ Proposal statuses are `open`, `accepted`, `escalated`, and `rejected`.
 
 ## MCP tools
 - `post_message`: validates and stores a typed message for a role with its `contract_version`. An optional `proposal_id` links a reply to an original proposal; standalone proposals start as their own thread root.
-- `check_inbox`: returns unread messages for a role and marks them read.
+- `check_inbox`: returns unread messages for a role and marks them read; set `peek` to `true` to leave them unread.
+- `mark_read`: marks the supplied message IDs as read and returns the IDs changed.
 - `read_contract`: returns the latest contract content and version.
 - `write_contract`: stores new contract content at the next version number.
 - `get_thread`: returns a proposal and its linked messages in chronological order.
@@ -26,6 +27,15 @@ Proposal statuses are `open`, `accepted`, `escalated`, and `rejected`.
 `check_inbox` and `get_thread` include a `warning` field on each message whose `contract_version` is older than the latest contract version.
 
 Storage: SQLite (tables: contracts, messages).
+
+## Running the MCP server
+
+From the project root, start the server with the project's Python environment:
+
+- Stdio (default): `python server/app.py` or `python server/app.py --stdio`
+- Streamable HTTP: `python server/app.py --http` (listens on `http://127.0.0.1:8000/mcp`)
+
+HTTP mode requires bearer tokens configured through `TEAMBRAIN_TOKEN_UIUX`, `TEAMBRAIN_TOKEN_FRONTEND`, and `TEAMBRAIN_TOKEN_BACKEND`. Each configured token authenticates as its matching role. Requests without a valid token receive HTTP 401. For HTTP calls, `post_message` uses the token's role as `from_role`, and `check_inbox` reads only that role's inbox. Optional `TEAMBRAIN_ALLOWED_HOSTS` accepts comma-separated hostnames for tunnel access; DNS rebinding protection stays enabled.
 
 ## Later
 - Dashboard showing each AI's activity

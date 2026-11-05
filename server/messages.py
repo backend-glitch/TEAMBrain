@@ -108,8 +108,10 @@ def post_message(
     }
 
 
-def check_inbox(to_role: str) -> list[dict[str, str | int | None]]:
-    """Return unread messages for a role and mark them read."""
+def check_inbox(
+    to_role: str, peek: bool = False
+) -> list[dict[str, str | int | None]]:
+    """Return unread messages; peek leaves them unread."""
     with sqlite3.connect(DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
         create_tables(connection)
@@ -126,12 +128,38 @@ def check_inbox(to_role: str) -> list[dict[str, str | int | None]]:
             """,
             (to_role,),
         ).fetchall()
-        connection.executemany(
-            'UPDATE messages SET "read" = 1 WHERE id = ?',
-            [(row["id"],) for row in rows],
-        )
+        if not peek:
+            connection.executemany(
+                'UPDATE messages SET "read" = 1 WHERE id = ?',
+                [(row["id"],) for row in rows],
+            )
 
     return _messages_with_contract_warnings(rows, latest_version)
+
+
+def mark_read(message_ids: list[str]) -> dict[str, list[str]]:
+    """Mark the supplied unread messages as read and return the changed IDs."""
+    if not message_ids:
+        return {"marked_read": []}
+
+    placeholders = ", ".join("?" for _ in message_ids)
+    with sqlite3.connect(DB_PATH) as connection:
+        create_tables(connection)
+        unread_ids = [
+            row[0]
+            for row in connection.execute(
+                f'SELECT id FROM messages WHERE id IN ({placeholders}) AND "read" = 0 ORDER BY id',
+                message_ids,
+            ).fetchall()
+        ]
+        if unread_ids:
+            unread_placeholders = ", ".join("?" for _ in unread_ids)
+            connection.execute(
+                f'UPDATE messages SET "read" = 1 WHERE id IN ({unread_placeholders})',
+                unread_ids,
+            )
+
+    return {"marked_read": unread_ids}
 
 
 def read_contract() -> dict[str, str | int] | None:
