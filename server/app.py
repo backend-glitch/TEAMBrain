@@ -20,7 +20,12 @@ from server.messages import (
 )
 from server.http_auth import BearerRoleMiddleware, configured_tokens, current_role
 from server.http_security import transport_security_settings
-from server.dashboard import dashboard_api, dashboard_page
+from server.dashboard import (
+    dashboard_api,
+    dashboard_login,
+    dashboard_logout,
+    dashboard_page,
+)
 
 mcp = MCPServer("TeamBrain")
 
@@ -80,6 +85,8 @@ def create_http_app():
     )
     app.add_route("/dashboard", dashboard_page, methods=["GET"])
     app.add_route("/api/dashboard", dashboard_api, methods=["GET"])
+    app.add_route("/api/login", dashboard_login, methods=["POST"])
+    app.add_route("/api/logout", dashboard_logout, methods=["POST"])
     app.add_middleware(
         BearerRoleMiddleware,
         tokens=configured_tokens(),

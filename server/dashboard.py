@@ -1,13 +1,29 @@
 """Read-only HTTP dashboard for TeamBrain."""
 
+import base64
+from contextlib import closing
+import hashlib
+import hmac
+import json
+import os
 import sqlite3
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from server import messages
+
+
+SESSION_COOKIE = "teambrain_session"
+SESSION_SECONDS = 7 * 24 * 60 * 60
+_LOGIN_FAILURES: dict[str, list[float]] = {}
+_LOGIN_FAILURES_LOCK = threading.Lock()
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -25,26 +41,25 @@ DASHBOARD_HTML = """<!doctype html>
     #status{min-height:20px;color:var(--muted);font-size:12px;margin:14px 0 8px}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0 24px}.stat,.proposal{background:var(--panel);border:1px solid var(--line);border-radius:12px}.stat{padding:14px 16px}.stat span{display:block;color:var(--muted);font-size:12px}.stat strong{display:block;font-size:25px;line-height:1.2;margin-top:6px;letter-spacing:-.04em}.stat.open strong{color:#86b9ff}.stat.accepted strong{color:var(--accent)}.stat.escalated strong{color:var(--amber)}.stat.rejected strong{color:#ee8d98}
     .filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 22px}.filter-label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.09em;margin-right:2px}.chip{border:1px solid var(--line);background:transparent;color:#aab5c1;border-radius:999px;padding:6px 11px;font-size:12px}.chip.active{background:#183129;border-color:#346958;color:#a5f0d9}.filter-gap{width:8px}
     h2{font-size:15px;letter-spacing:-.01em;margin:28px 0 11px}.section-note{color:var(--muted);font-weight:400;font-size:12px;margin-left:7px}.list{display:grid;gap:10px}.proposal{overflow:hidden;transition:border-color .18s,background .18s}.proposal:hover{border-color:#3a4a59;background:#141b23}.proposal.escalation{border-color:#765a31;background:linear-gradient(110deg,#211b12,var(--panel) 44%)}.proposal-head{width:100%;text-align:left;background:none;border:0;padding:15px 17px;display:block}.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.titleline{font-weight:620;min-width:0;flex:1;overflow-wrap:anywhere}.status-pill,.role,.type,.warning{display:inline-flex;align-items:center;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.045em;padding:3px 8px;text-transform:uppercase;white-space:nowrap}.status-open{background:#17283b;color:#8bbcff}.status-accepted{background:#132b24;color:#82e1bd}.status-escalated{background:#382915;color:#f0bd69}.status-rejected{background:#351d24;color:#f19aa5}.role-uiux{background:#302039;color:#d8adf2}.role-frontend{background:#16323a;color:#87d7e8}.role-backend{background:#33271a;color:#e8bd85}.role-other{background:#252d36;color:#bdc8d3}.type{background:#252d36;color:#bec9d5}.warning{background:#3b2b13;color:#f1c36f}.subline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:11px}.subline .sep{opacity:.45}.thread{display:grid;grid-template-rows:0fr;transition:grid-template-rows .24s ease}.proposal.expanded .thread{grid-template-rows:1fr}.thread-inner{overflow:hidden;min-height:0}.timeline{margin:0 17px 16px 23px;padding:2px 0 0 17px;border-left:1px solid #35434f}.message{position:relative;padding:0 0 15px 0}.message:last-child{padding-bottom:2px}.message:before{content:"";position:absolute;width:7px;height:7px;border-radius:50%;background:#718091;left:-21px;top:6px;box-shadow:0 0 0 3px var(--panel)}.message-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;color:var(--muted);font-size:11px}.message-body{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0 0;color:#dce3ea;font-size:13px}.empty{border:1px dashed #34404b;border-radius:11px;padding:22px;text-align:center;color:var(--muted);background:#10151b}.empty strong{display:block;color:#c4ced8;margin-bottom:4px}.section{margin-top:4px}.hidden{display:none!important}
-    @media(max-width:620px){.shell{padding:18px 14px 40px}.topbar{gap:10px}.brand{font-size:21px}.live{order:3;width:100%;margin-left:0}.unlock{margin-left:auto}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.stat{padding:12px}.stat strong{font-size:22px}.proposal-head{padding:13px}.titleline{flex-basis:100%;order:2}.status-pill{order:1}.timeline{margin-left:17px}}
+    .logout{margin-left:auto;border:1px solid var(--line);background:var(--panel);border-radius:9px;padding:8px 11px;color:#bdc8d3;font-size:12px}.login{max-width:390px;margin:10vh auto 0;padding:26px;background:var(--panel);border:1px solid var(--line);border-radius:15px;box-shadow:0 24px 70px #0005}.login h2{font-size:20px;margin:0 0 5px}.login p{color:var(--muted);font-size:13px;margin:0 0 20px}.login label{display:block;color:#bdc8d3;font-size:12px;margin-bottom:7px}.login input{width:100%;background:#0c1117;border:1px solid var(--line);border-radius:8px;color:var(--text);padding:11px}.login button{width:100%;margin-top:12px;border:0;border-radius:8px;background:var(--accent);color:#092019;padding:11px;font-weight:750}.login-error{min-height:20px;margin:10px 0 0!important;color:#f19aa5!important;font-size:12px!important}
+    @media(max-width:620px){.shell{padding:18px 14px 40px}.topbar{gap:10px}.brand{font-size:21px}.live{order:3;width:100%;margin-left:0}.logout{margin-left:auto}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.stat{padding:12px}.stat strong{font-size:22px}.proposal-head{padding:13px}.titleline{flex-basis:100%;order:2}.status-pill{order:1}.timeline{margin-left:17px}}
     @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;transition:none!important}}
   </style>
 </head>
 <body><main class="shell">
-  <header class="topbar"><h1 class="brand">TeamBrain</h1><span id="version" class="version">Contract v—</span><div class="live"><i class="dot"></i><span id="updated">Waiting for data</span></div>
-    <details class="unlock"><summary>Unlock dashboard</summary><div class="tokenbox"><label for="token">Dashboard token</label><div class="tokenrow"><input id="token" type="password" autocomplete="off" spellcheck="false"><button id="connect" type="button">Connect</button></div><p class="hint">Stored in this tab only. Sent in the authorization header.</p></div></details>
-  </header>
-  <div id="status" role="status">Enter your dashboard token to load the shared workspace.</div>
+  <header class="topbar"><h1 class="brand">TeamBrain</h1><span id="version" class="version">Contract v—</span><div class="live"><i class="dot"></i><span id="updated">Waiting for data</span></div><button id="logout" class="logout hidden" type="button">Log out</button></header>
+  <section id="login" class="login"><h2>Welcome back</h2><p>Sign in to view the TeamBrain dashboard.</p><form id="login-form"><label for="password">Dashboard password</label><input id="password" type="password" autocomplete="current-password" required><button type="submit">Sign in</button><p id="login-error" class="login-error" role="status"></p></form></section>
+  <section id="workspace" class="hidden"><div id="status" role="status"></div>
   <section id="stats" class="stats" aria-label="Proposal counts"></section>
   <nav id="filters" class="filters" aria-label="Filter proposals"></nav>
   <section class="section"><h2>Needs human attention <span id="escalated-count" class="section-note"></span></h2><div id="escalated" class="list"></div></section>
-  <section class="section"><h2>Proposals <span id="proposal-count" class="section-note"></span></h2><div id="proposals" class="list"></div></section>
+  <section class="section"><h2>Proposals <span id="proposal-count" class="section-note"></span></h2><div id="proposals" class="list"></div></section></section>
 </main>
 <script>
   "use strict";
-  const tokenInput=document.getElementById("token"),statusNode=document.getElementById("status"),storageKey="teambrain-dashboard-token";
+  const statusNode=document.getElementById("status"),loginNode=document.getElementById("login"),workspaceNode=document.getElementById("workspace");
   const countsNode=document.getElementById("stats"),filtersNode=document.getElementById("filters"),proposalNode=document.getElementById("proposals"),escalatedNode=document.getElementById("escalated");
-  let dataset=null,lastSuccess=null,selectedStatus="all",selectedRole="all";
-  try{tokenInput.value=sessionStorage.getItem(storageKey)||""}catch(_){}
+  let dataset=null,lastSuccess=null,authenticated=false,selectedStatus="all",selectedRole="all";
   function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text==null?"":String(text);return n}
   function roleTag(role){const r=String(role||"unknown").toLowerCase(),known=["uiux","frontend","backend"].includes(r);return el("span",`role role-${known?r:"other"}`,role||"unknown")}
   function relative(value){const t=Date.parse(value||"");if(!Number.isFinite(t))return "time unknown";const sec=Math.max(0,Math.floor((Date.now()-t)/1000));if(sec<60)return "just now";if(sec<3600)return `${Math.floor(sec/60)} min ago`;if(sec<86400)return `${Math.floor(sec/3600)} hr ago`;if(sec<604800)return `${Math.floor(sec/86400)} days ago`;return new Date(t).toLocaleDateString()}
@@ -54,8 +69,12 @@ DASHBOARD_HTML = """<!doctype html>
   function filtered(){return (dataset?.proposals||[]).filter(p=>(selectedStatus==="all"||p.status===selectedStatus)&&(selectedRole==="all"||p.from_role===selectedRole||p.to_role===selectedRole))}
   function renderFilters(){filtersNode.replaceChildren();const groups=[["Status",["all","open","accepted","escalated","rejected"]],["Role",["all","uiux","frontend","backend"]]];for(let gi=0;gi<groups.length;gi++){const [label,values]=groups[gi];if(gi)filtersNode.append(el("span","filter-gap"));filtersNode.append(el("span","filter-label",label));for(const value of values){const active=(gi===0?selectedStatus:selectedRole)===value,b=el("button",`chip${active?" active":""}`,value==="all"?"All":value);b.type="button";b.addEventListener("click",()=>{if(gi===0)selectedStatus=value;else selectedRole=value;render()});filtersNode.append(b)}}}
   function render(){if(!dataset)return;const all=dataset.proposals||[],visible=filtered(),counts={open:0,accepted:0,escalated:0,rejected:0};for(const p of all)if(Object.hasOwn(counts,p.status))counts[p.status]++;document.getElementById("version").textContent=`Contract v${dataset.contract_version??0}`;countsNode.replaceChildren();for(const [key,label] of [["open","Open"],["accepted","Accepted"],["escalated","Escalated"],["rejected","Rejected"]]){const box=el("div",`stat ${key}`);box.append(el("span","",label),el("strong","",counts[key]));countsNode.append(box)}renderFilters();const escalated=visible.filter(p=>p.status==="escalated");document.getElementById("escalated-count").textContent=`${escalated.length} ${escalated.length===1?"proposal":"proposals"}`;escalatedNode.replaceChildren();if(escalated.length)for(const p of escalated)escalatedNode.append(makeProposal(p,true));else empty(escalatedNode,"Nothing needs escalation","Escalated proposals will appear here for human review.");document.getElementById("proposal-count").textContent=`${visible.length} shown`;proposalNode.replaceChildren();if(visible.length)for(const p of visible)proposalNode.append(makeProposal(p,false));else empty(proposalNode,"No proposals match","Try another status or role filter.")}
-  async function refresh(){const token=tokenInput.value.trim();if(!token){statusNode.textContent="Enter your dashboard token to load the shared workspace.";return}try{sessionStorage.setItem(storageKey,token)}catch(_){}try{const response=await fetch("/api/dashboard",{headers:{"Authorization":`Bearer ${token}`}});if(!response.ok)throw new Error(response.status===401?"Access denied. Check the dashboard token.":`Could not refresh (${response.status}).`);dataset=await response.json();render();lastSuccess=Date.now();document.getElementById("updated").textContent="Updated just now";statusNode.textContent="Connected · refreshes every 5 seconds."}catch(error){statusNode.textContent=error.message}}
-  document.getElementById("connect").addEventListener("click",refresh);tokenInput.addEventListener("keydown",event=>{if(event.key==="Enter")refresh()});setInterval(()=>{if(tokenInput.value.trim())refresh();if(lastSuccess)document.getElementById("updated").textContent=`Updated ${relative(new Date(lastSuccess).toISOString())}`},5000);if(tokenInput.value)refresh();
+  function showLogin(message=""){authenticated=false;workspaceNode.classList.add("hidden");document.getElementById("logout").classList.add("hidden");loginNode.classList.remove("hidden");document.getElementById("login-error").textContent=message}
+  function showWorkspace(){authenticated=true;loginNode.classList.add("hidden");workspaceNode.classList.remove("hidden");document.getElementById("logout").classList.remove("hidden")}
+  async function refresh(){try{const response=await fetch("/api/dashboard",{credentials:"same-origin"});if(response.status===401){showLogin();return}if(!response.ok)throw new Error("Could not refresh the dashboard.");dataset=await response.json();showWorkspace();render();lastSuccess=Date.now();document.getElementById("updated").textContent="Updated just now";statusNode.textContent="Connected · refreshes every 5 seconds."}catch(_){statusNode.textContent="Could not refresh the dashboard."}}
+  document.getElementById("login-form").addEventListener("submit",async event=>{event.preventDefault();const password=document.getElementById("password"),error=document.getElementById("login-error");error.textContent="";try{const response=await fetch("/api/login",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:password.value})});if(response.ok){password.value="";await refresh()}else if(response.status===429)error.textContent="Too many attempts. Please wait a minute and try again.";else error.textContent="Wrong password. Please try again."}catch(_){error.textContent="Wrong password. Please try again."}});
+  document.getElementById("logout").addEventListener("click",async()=>{try{await fetch("/api/logout",{method:"POST",credentials:"same-origin"})}finally{dataset=null;showLogin();document.getElementById("password").value=""}});
+  setInterval(()=>{if(authenticated)refresh();if(lastSuccess)document.getElementById("updated").textContent=`Updated ${relative(new Date(lastSuccess).toISOString())}`},5000);refresh();
 </script></body></html>"""
 
 
@@ -69,7 +88,7 @@ def dashboard_payload() -> dict[str, Any]:
     if not database_path.exists():
         return {"contract_version": 0, "proposals": [], "escalated_proposals": []}
 
-    with _readonly_connection(database_path) as connection:
+    with closing(_readonly_connection(database_path)) as connection:
         connection.row_factory = sqlite3.Row
         contract_version = connection.execute(
             "SELECT COALESCE(MAX(version), 0) FROM contracts"
@@ -115,10 +134,103 @@ def dashboard_payload() -> dict[str, Any]:
 
 
 async def dashboard_page(request: Request):
-    """Serve the static dashboard page."""
+    """Serve the dashboard shell; client data access is session authenticated."""
     return HTMLResponse(DASHBOARD_HTML)
+
+
+def _session_signature(expires: str) -> str | None:
+    secret = os.environ.get("TEAMBRAIN_SESSION_SECRET")
+    if not secret:
+        return None
+    return hmac.new(secret.encode("utf-8"), expires.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def _valid_session(request: Request) -> bool:
+    cookie = request.cookies.get(SESSION_COOKIE, "")
+    expires, dot, signature = cookie.partition(".")
+    if not dot or not expires.isascii() or not expires.isdigit():
+        return False
+    expected = _session_signature(expires)
+    if expected is None or not hmac.compare_digest(signature, expected):
+        return False
+    return int(expires) > int(time.time())
+
+
+def _valid_origin(request: Request) -> bool:
+    origin = request.headers.get("origin", "")
+    parsed = urlsplit(origin)
+    expected = f"{request.url.scheme}://{request.url.netloc}"
+    return bool(parsed.scheme and parsed.netloc and not parsed.path and origin == expected)
+
+
+def _login_limited(ip: str, *, failed: bool = False) -> bool:
+    now = time.monotonic()
+    with _LOGIN_FAILURES_LOCK:
+        attempts = [stamp for stamp in _LOGIN_FAILURES.get(ip, []) if now - stamp < 60]
+        if failed:
+            attempts.append(now)
+        _LOGIN_FAILURES[ip] = attempts
+        return len(attempts) >= 5 and not failed
+
+
+async def dashboard_login(request: Request):
+    """Validate the dashboard password and issue a signed session cookie."""
+    if not _valid_origin(request):
+        return JSONResponse({"error": "Request rejected."}, status_code=403)
+    ip = request.client.host if request.client else "unknown"
+    if _login_limited(ip):
+        return JSONResponse({"error": "Too many attempts."}, status_code=429)
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        payload = {}
+    supplied = payload.get("password", "") if isinstance(payload, dict) else ""
+    if not isinstance(supplied, str):
+        supplied = ""
+    expected_password = os.environ.get("TEAMBRAIN_DASHBOARD_TOKEN", "")
+    password_matches = hmac.compare_digest(
+        supplied.encode("utf-8"), expected_password.encode("utf-8")
+    )
+    if not expected_password or not password_matches:
+        _login_limited(ip, failed=True)
+        return JSONResponse({"error": "Wrong password."}, status_code=401)
+    expires = str(int(time.time()) + SESSION_SECONDS)
+    signature = _session_signature(expires)
+    if signature is None:
+        return JSONResponse({"error": "Sign-in unavailable."}, status_code=503)
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        SESSION_COOKIE,
+        f"{expires}.{signature}",
+        max_age=SESSION_SECONDS,
+        expires=datetime.now(timezone.utc) + timedelta(seconds=SESSION_SECONDS),
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+    with _LOGIN_FAILURES_LOCK:
+        _LOGIN_FAILURES.pop(ip, None)
+    return response
+
+
+async def dashboard_logout(request: Request):
+    """Clear the dashboard session cookie after a same-origin POST."""
+    if not _valid_origin(request):
+        return JSONResponse({"error": "Request rejected."}, status_code=403)
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+    return response
 
 
 async def dashboard_api(request: Request):
     """Serve read-only dashboard data as JSON."""
+    if not _valid_session(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     return JSONResponse(dashboard_payload())

@@ -28,7 +28,12 @@ def configured_tokens() -> dict[str, str]:
 class BearerRoleMiddleware:
     """Authenticate dashboard and MCP routes with separate bearer tokens."""
 
-    DASHBOARD_PATHS = {"/dashboard", "/api/dashboard"}
+    DASHBOARD_PATHS = {
+        "/dashboard",
+        "/api/dashboard",
+        "/api/login",
+        "/api/logout",
+    }
 
     def __init__(
         self,
@@ -48,14 +53,6 @@ class BearerRoleMiddleware:
             return
 
         if scope.get("path") in self.DASHBOARD_PATHS:
-            presented = self._bearer_token(scope)
-            if not self.dashboard_token or not self._matches(
-                presented, self.dashboard_token
-            ):
-                await PlainTextResponse("Unauthorized", status_code=401)(
-                    scope, receive, send
-                )
-                return
             await self.app(scope, receive, send)
             return
 
