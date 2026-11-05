@@ -21,3 +21,19 @@ def test_check_inbox_returns_and_marks_only_matching_unread_messages(
             'SELECT to_role, "read" FROM messages ORDER BY body'
         ).fetchall()
     assert read_states == [("frontend", 1), ("backend", 0)]
+
+
+def test_check_inbox_warns_when_message_uses_older_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
+    messages.write_contract("Contract version one")
+    old_message = messages.post_message(
+        "frontend", "backend", "request", "Written against v1", 1
+    )
+    messages.write_contract("Contract version two")
+
+    inbox = messages.check_inbox("backend")
+
+    assert inbox[0]["id"] == old_message["id"]
+    assert inbox[0]["warning"] == (
+        "Message uses contract version 1; latest contract version is 2."
+    )

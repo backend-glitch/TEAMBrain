@@ -29,3 +29,14 @@ def test_read_contract_returns_none_when_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(messages, "DB_PATH", tmp_path / "contracts.sqlite3")
 
     assert messages.read_contract() is None
+
+
+def test_write_contract_increments_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "contracts.sqlite3")
+
+    first = messages.write_contract("Initial API contract")
+    second = messages.write_contract("Updated API contract")
+
+    assert first["version"] == 1
+    assert second["version"] == 2
+    assert messages.read_contract() == second

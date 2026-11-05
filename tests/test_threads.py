@@ -41,3 +41,25 @@ def test_get_thread_returns_empty_list_for_unknown_proposal(tmp_path, monkeypatc
     monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
 
     assert messages.get_thread("missing") == []
+
+
+def test_get_thread_warns_only_for_messages_using_older_contract(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
+    messages.write_contract("Contract version one")
+    proposal = messages.post_message(
+        "frontend", "backend", "proposal", "Written against v1", 1
+    )
+    messages.write_contract("Contract version two")
+    messages.post_message(
+        "backend", "frontend", "objection", "Written against v2", 2,
+        proposal_id=proposal["id"],
+    )
+
+    thread = messages.get_thread(proposal["id"])
+
+    assert thread[0]["warning"] == (
+        "Message uses contract version 1; latest contract version is 2."
+    )
+    assert "warning" not in thread[1]

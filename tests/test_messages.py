@@ -68,3 +68,19 @@ def test_post_message_rejects_unknown_proposal_id(tmp_path, monkeypatch):
         messages.post_message(
             "backend", "frontend", "accept", "Agreed", 1, proposal_id="missing"
         )
+
+
+def test_post_message_stores_contract_version(tmp_path, monkeypatch):
+    database_path = tmp_path / "messages.sqlite3"
+    monkeypatch.setattr(messages, "DB_PATH", database_path)
+
+    result = messages.post_message(
+        "frontend", "backend", "request", "Use contract v7", 7
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        contract_version = connection.execute(
+            "SELECT contract_version FROM messages WHERE id = ?", (result["id"],)
+        ).fetchone()[0]
+
+    assert contract_version == 7
