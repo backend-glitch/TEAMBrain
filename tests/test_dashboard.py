@@ -192,12 +192,17 @@ def test_script_message_is_data_and_page_uses_text_content(dashboard_client):
     assert ".innerHTML" not in page
     assert "<script>alert('x')</script>" not in page
     assert 'fetch("/api/dashboard"' in page
-    assert "Recent messages" in page
-    assert "dataset.recent_messages" in page
+    assert "Activity" in page
+    assert "dataset?.recent_messages" in page
     assert "},3000);refresh();" in page
-    assert "Contract v${dataset.contract_version??0}" in page
+    assert "Contract v${dataset?.contract_version??0}" in page
     assert '"Authorization": `Bearer ${token}`' not in page
-    assert "localStorage" not in page
+    assert 'localStorage.setItem("teambrain-dashboard-theme"' in page
+    assert 'localStorage.setItem("teambrain-dashboard-token"' not in page
+    assert "@supports(backdrop-filter:blur(16px))" in page
+    assert "rgba(255,255,255,.08)" in page
+    assert "#0b1026" in page and "#14b8a6" in page and "#c6f432" in page
+    assert "https://" not in page and "<script src=" not in page
 
 
 def test_dashboard_member_profile_is_rendered_as_text_and_edit_requires_session(
@@ -241,8 +246,11 @@ def test_dashboard_member_profile_is_rendered_as_text_and_edit_requires_session(
     assert ".innerHTML" not in page
     assert malicious_name not in page
     assert "navigator.clipboard.writeText(prompt)" in page
-    assert "Headless mode is coming soon" in page
-    assert "dataset.members" in page
+    assert "Headless mode is not implemented yet" in page
+    assert "dataset?.members" in page
+    assert 'id="team-carousel"' in page
+    assert 'id="theme-toggle"' in page
+    assert 'id="activity-toggle"' in page
 
     rejected = client.post(
         "/api/members/frontend",
@@ -390,7 +398,7 @@ def test_dashboard_handoff_prompt_and_generated_prompt_are_peek_only(
     assert all(value == 0 for _, value in read_values)
 
     page = dashboard.DASHBOARD_HTML
-    assert 'message.handoff_prompt||`You are the ${role}. Use only the TeamBrain MCP tools. ${message.from_role} says: ${message.body}. Read thread ${message.proposal_id||"(no proposal_id)"}, do what it asks, reply with objection or accept using proposal_id, then mark_read.`' in page
+    assert 'message.handoff_prompt||`You are the ${member.role}. Use only the TeamBrain MCP tools. ${message.from_role} says: ${message.body}. Read thread ${message.proposal_id||"(no proposal_id)"}, do what it asks, reply with objection or accept using proposal_id, then mark_read.`' in page
     assert 'el("p","handoff-prompt",prompt)' in page
     assert 'link.type="button"' in page
     assert 'navigator.clipboard.writeText(prompt)' in page
@@ -495,3 +503,36 @@ def test_dashboard_add_role_page_uses_dynamic_roles_and_safe_text(dashboard_clie
     assert "Set ${data.token_env_var}" in page
     assert "The server never generates or stores tokens." in page
     assert ".innerHTML" not in page
+
+
+def test_dashboard_human_decision_requires_session_csrf_and_resolves_escalated(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "dashboard-decision.sqlite3")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_FRONTEND", "frontend-role-token")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_BACKEND", "backend-role-token")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_UIUX", "uiux-role-token")
+    monkeypatch.setenv("TEAMBRAIN_DASHBOARD_TOKEN", "dashboard-only-password")
+    monkeypatch.setenv("TEAMBRAIN_SESSION_SECRET", "test-session-signing-secret")
+    dashboard._LOGIN_FAILURES.clear()
+    app = app_module.create_http_app()
+    with TestClient(app, base_url=ORIGIN) as client:
+        proposal = messages.post_message("frontend", "backend", "proposal", "Set cursor paging", 1)
+        for _ in range(3):
+            messages.post_message(
+                "backend", "frontend", "objection", "Needs cursor semantics", 1,
+                proposal_id=proposal["proposal_id"],
+            )
+        path = f"/api/proposals/{proposal['proposal_id']}/decision"
+        payload = {"decision": "reject", "note": "Define cursor semantics first."}
+        assert client.post(path, json=payload, headers={"Origin": ORIGIN}).status_code == 401
+        assert login(client).status_code == 200
+        assert client.post(
+            path, json=payload, headers={"Origin": "https://attacker.example"}
+        ).status_code == 403
+        response = client.post(path, json=payload, headers={"Origin": ORIGIN})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    assert response.json()["note"] == payload["note"]
+    assert messages.get_thread(proposal["proposal_id"])[0]["status"] == "rejected"

@@ -80,6 +80,7 @@ def test_forwarded_headers_are_rejected_for_dashboard_and_api_but_not_mcp():
         ("/api/tasks/frontend", {"Cf-Connecting-Ip": "203.0.113.11"}),
         ("/api/roles", {"X-Forwarded-For": "203.0.113.12"}),
         ("/api/roles/qa/active", {"Cf-Connecting-Ip": "203.0.113.13"}),
+        ("/api/proposals/proposal-1/decision", {"X-Forwarded-For": "203.0.113.14"}),
     ):
         events = invoke_middleware(
             middleware, path=path, forwarded_headers=forwarded

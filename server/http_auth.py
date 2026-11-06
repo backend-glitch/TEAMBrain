@@ -67,6 +67,7 @@ class BearerRoleMiddleware:
         "/api/login",
         "/api/logout",
         "/api/roles",
+        "/api/proposals",
     }
 
     def __init__(
@@ -104,6 +105,7 @@ class BearerRoleMiddleware:
             or path.startswith("/api/members/")
             or path.startswith("/api/tasks/")
             or path.startswith("/api/roles/")
+            or path.startswith("/api/proposals/")
         ):
             await self.app(scope, receive, send)
             return

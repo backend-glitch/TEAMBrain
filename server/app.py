@@ -36,6 +36,7 @@ from server.dashboard import (
     dashboard_send_task,
     dashboard_create_role,
     dashboard_set_role_active,
+    dashboard_human_decision,
     dashboard_update_member,
 )
 
@@ -186,6 +187,11 @@ def create_http_app():
     app.add_route("/api/tasks/{role}", dashboard_send_task, methods=["POST"])
     app.add_route("/api/roles", dashboard_create_role, methods=["POST"])
     app.add_route("/api/roles/{role}/active", dashboard_set_role_active, methods=["POST"])
+    app.add_route(
+        "/api/proposals/{proposal_id}/decision",
+        dashboard_human_decision,
+        methods=["POST"],
+    )
     app.add_route("/api/login", dashboard_login, methods=["POST"])
     app.add_route("/api/logout", dashboard_logout, methods=["POST"])
     dashboard_token = os.environ.get("TEAMBRAIN_DASHBOARD_TOKEN")

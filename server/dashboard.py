@@ -21,6 +21,7 @@ from server import messages
 from server.database import create_tables
 from server.members import dashboard_members, set_dashboard_member, set_profile
 from server.roles import create_role, list_roles, set_role_active, validate_role
+from server.dashboard_ui import DASHBOARD_HTML as _REDESIGNED_DASHBOARD_HTML
 
 
 SESSION_COOKIE = "teambrain_session"
@@ -91,6 +92,10 @@ DASHBOARD_HTML = """<!doctype html>
   document.getElementById("logout").addEventListener("click",async()=>{try{await fetch("/api/logout",{method:"POST",credentials:"same-origin"})}finally{dataset=null;showLogin();document.getElementById("password").value=""}});
   setInterval(()=>{if(authenticated)refresh();if(lastSuccess)document.getElementById("updated").textContent=`Updated ${relative(new Date(lastSuccess).toISOString())}`},3000);refresh();
 </script></body></html>"""
+
+# The page remains a single self-contained HTML response; keeping its presentation
+# in a separate Python module makes the dashboard UI easier to maintain.
+DASHBOARD_HTML = _REDESIGNED_DASHBOARD_HTML
 
 
 def _readonly_connection(database_path: Path) -> sqlite3.Connection:
@@ -390,3 +395,27 @@ async def dashboard_set_role_active(request: Request):
     except ValueError as error:
         return JSONResponse({"error": str(error)}, status_code=404)
     return JSONResponse(updated)
+
+
+async def dashboard_human_decision(request: Request):
+    """Resolve an escalated proposal using the owner's dashboard session."""
+    if not _valid_origin(request):
+        return JSONResponse({"error": "Request rejected."}, status_code=403)
+    if not _valid_session(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        payload = None
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "Invalid decision."}, status_code=400)
+    decision = payload.get("decision")
+    note = payload.get("note")
+    if decision not in {"accept", "reject"}:
+        return JSONResponse({"error": "decision must be 'accept' or 'reject'."}, status_code=400)
+    if note is not None and (not isinstance(note, str) or len(note) > 2000):
+        return JSONResponse({"error": "note must be plain text up to 2000 characters."}, status_code=400)
+    result = messages.human_decision(
+        request.path_params.get("proposal_id", ""), decision, note
+    )
+    return JSONResponse(result, status_code=400 if result.get("error") else 200)
