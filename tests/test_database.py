@@ -41,6 +41,7 @@ def test_create_tables_creates_contracts_and_messages():
             "proposal_id",
             "status",
             "decision_note",
+            "handoff_prompt",
             "created_at",
         }
         member_columns = {
@@ -58,7 +59,15 @@ def test_create_tables_creates_contracts_and_messages():
             "last_seen",
             "last_tool",
             "request_count",
+            "run_mode",
+            "tool_label",
         }
+        member_defaults = {
+            row[1]: row[4]
+            for row in connection.execute("PRAGMA table_info(members)")
+        }
+        assert member_defaults["run_mode"] == "'manual'"
+        assert member_defaults["tool_label"] == "''"
     finally:
         connection.close()
 
@@ -151,5 +160,39 @@ def test_create_tables_migrates_old_proposal_status_constraint():
             "FROM messages WHERE id = 'old-proposal'"
         ).fetchone()
         assert row == ("Preserve me", "old-proposal", "rejected", None)
+    finally:
+        connection.close()
+
+
+def test_create_tables_migrates_member_run_settings_with_manual_defaults():
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE members (
+                role TEXT PRIMARY KEY,
+                ai_name TEXT,
+                person_name TEXT,
+                machine_label TEXT,
+                client_name TEXT,
+                client_version TEXT,
+                last_ip TEXT,
+                first_seen TEXT,
+                last_seen TEXT,
+                last_tool TEXT,
+                request_count INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO members (role, ai_name) VALUES ('frontend', 'Nova')"
+        )
+
+        create_tables(connection)
+
+        row = connection.execute(
+            "SELECT ai_name, run_mode, tool_label FROM members WHERE role = 'frontend'"
+        ).fetchone()
+        assert row == ("Nova", "manual", "")
     finally:
         connection.close()

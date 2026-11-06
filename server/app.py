@@ -30,6 +30,7 @@ from server.dashboard import (
     dashboard_login,
     dashboard_logout,
     dashboard_page,
+    dashboard_send_task,
     dashboard_update_member,
 )
 
@@ -43,6 +44,7 @@ def post_message_tool(
     body: str,
     contract_version: int,
     proposal_id: str | None = None,
+    handoff_prompt: str | None = None,
 ) -> dict[str, str | int | None]:
     """Post a message, using the authenticated role for HTTP requests."""
     authenticated_role = current_role.get()
@@ -53,6 +55,7 @@ def post_message_tool(
         body=body,
         contract_version=contract_version,
         proposal_id=proposal_id,
+        handoff_prompt=handoff_prompt,
     )
 
 
@@ -174,6 +177,7 @@ def create_http_app():
     app.add_route("/dashboard", dashboard_page, methods=["GET"])
     app.add_route("/api/dashboard", dashboard_api, methods=["GET"])
     app.add_route("/api/members/{role}", dashboard_update_member, methods=["POST"])
+    app.add_route("/api/tasks/{role}", dashboard_send_task, methods=["POST"])
     app.add_route("/api/login", dashboard_login, methods=["POST"])
     app.add_route("/api/logout", dashboard_logout, methods=["POST"])
     app.add_middleware(

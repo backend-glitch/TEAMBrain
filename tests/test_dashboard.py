@@ -12,7 +12,8 @@ ORIGIN = "http://127.0.0.1:8000"
 
 
 @pytest.fixture
-def dashboard_client(monkeypatch):
+def dashboard_client(monkeypatch, tmp_path):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "dashboard-test.sqlite3")
     monkeypatch.setenv("TEAMBRAIN_TOKEN_FRONTEND", "frontend-role-token")
     monkeypatch.setenv("TEAMBRAIN_TOKEN_BACKEND", "backend-role-token")
     monkeypatch.setenv("TEAMBRAIN_TOKEN_UIUX", "uiux-role-token")
@@ -38,6 +39,28 @@ def dashboard_client(monkeypatch):
             "thread": thread,
         }],
         "escalated_proposals": [],
+        "members": [
+            {
+                "role": role,
+                "ai_name": f"{role} AI",
+                "person_name": "",
+                "machine_label": "",
+                "client_name": "",
+                "client_version": "",
+                "last_ip": "",
+                "first_seen": None,
+                "last_seen": None,
+                "last_tool": "",
+                "request_count": 0,
+                "messages_sent": 0,
+                "unread_count": 0,
+                "unread_messages": [],
+                "waiting_on_open_proposal": False,
+                "run_mode": "manual",
+                "tool_label": "",
+            }
+            for role in ("uiux", "frontend", "backend")
+        ],
     }
     monkeypatch.setattr(dashboard, "dashboard_payload", lambda: payload)
 
@@ -213,6 +236,9 @@ def test_dashboard_member_profile_is_rendered_as_text_and_edit_requires_session(
     assert "textContent" in page
     assert ".innerHTML" not in page
     assert malicious_name not in page
+    assert "navigator.clipboard.writeText(prompt)" in page
+    assert "Headless mode is coming soon" in page
+    assert "dataset.members" in page
 
     rejected = client.post(
         "/api/members/frontend",
@@ -223,7 +249,13 @@ def test_dashboard_member_profile_is_rendered_as_text_and_edit_requires_session(
 
     accepted = client.post(
         "/api/members/frontend",
-        json={"ai_name": "Nova", "person_name": "Alex", "machine_label": "PC"},
+        json={
+            "ai_name": "Nova",
+            "person_name": "Alex",
+            "machine_label": "PC",
+            "run_mode": "headless",
+            "tool_label": "Cursor",
+        },
         headers={"Origin": ORIGIN},
     )
     assert accepted.status_code == 200
@@ -232,7 +264,131 @@ def test_dashboard_member_profile_is_rendered_as_text_and_edit_requires_session(
         "ai_name": "Nova",
         "person_name": "Alex",
         "machine_label": "PC",
+        "run_mode": "headless",
+        "tool_label": "Cursor",
     }
+
+
+def test_dashboard_send_task_creates_owner_proposal_and_requires_session_csrf(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "send-task.sqlite3")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_FRONTEND", "frontend-role-token")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_BACKEND", "backend-role-token")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_UIUX", "uiux-role-token")
+    monkeypatch.setenv("TEAMBRAIN_DASHBOARD_TOKEN", "dashboard-only-password")
+    monkeypatch.setenv("TEAMBRAIN_SESSION_SECRET", "test-session-signing-secret")
+    dashboard._LOGIN_FAILURES.clear()
+    app = app_module.create_http_app()
+    client_context = TestClient(app, base_url=ORIGIN)
+    client = client_context.__enter__()
+    payload = {"task": "Implement the approved pagination spec."}
+    try:
+        assert client.post(
+            "/api/tasks/frontend", json=payload, headers={"Origin": ORIGIN}
+        ).status_code == 401
+        assert client.post(
+            "/api/tasks/frontend",
+            json=payload,
+            headers={"Origin": ORIGIN, "Authorization": "Bearer frontend-role-token"},
+        ).status_code == 401
+
+        assert login(client).status_code == 200
+        assert client.post(
+            "/api/tasks/frontend",
+            json=payload,
+            headers={"Origin": "https://attacker.example"},
+        ).status_code == 403
+
+        sent = client.post(
+            "/api/tasks/frontend", json=payload, headers={"Origin": ORIGIN}
+        )
+        assert sent.status_code == 201
+        response = sent.json()
+        thread = messages.get_thread(response["proposal_id"])
+        assert len(thread) == 1
+        assert thread[0]["from_role"] == "owner"
+        assert thread[0]["to_role"] == "frontend"
+        assert thread[0]["type"] == "proposal"
+        assert thread[0]["body"] == payload["task"]
+        dashboard_data = client.get("/api/dashboard").json()
+        assert any(item["id"] == response["id"] for item in dashboard_data["recent_messages"])
+        assert any(item["id"] == response["proposal_id"] for item in dashboard_data["proposals"])
+        frontend = next(member for member in dashboard_data["members"] if member["role"] == "frontend")
+        assert frontend["unread_count"] == 1
+        assert frontend["waiting_on_open_proposal"] is True
+        assert any(item["id"] == response["id"] for item in messages.check_inbox("frontend", peek=True))
+    finally:
+        client_context.__exit__(None, None, None)
+
+
+def test_dashboard_member_unread_and_waiting_counts_use_unread_inbox_without_marking(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "unread-dashboard.sqlite3")
+    backend_proposal = messages.post_message(
+        "owner", "backend", "proposal", "Open backend task", 1
+    )
+    messages.post_message("owner", "backend", "request", "Standalone ping", 1)
+    frontend_proposal = messages.post_message(
+        "owner", "frontend", "proposal", "Resolved frontend task", 1
+    )
+    messages.post_message(
+        "backend", "frontend", "accept", "Accepted", 1,
+        proposal_id=frontend_proposal["proposal_id"],
+    )
+
+    payload = dashboard.dashboard_payload()
+    members = {member["role"]: member for member in payload["members"]}
+    assert members["backend"]["unread_count"] == 2
+    assert members["backend"]["waiting_on_open_proposal"] is True
+    assert members["frontend"]["unread_count"] == 2
+    assert members["frontend"]["waiting_on_open_proposal"] is False
+    assert len(messages.check_inbox("backend", peek=True)) == 2
+    assert len(messages.check_inbox("frontend", peek=True)) == 2
+    assert messages.get_thread(backend_proposal["proposal_id"])[0]["status"] == "open"
+
+
+def test_dashboard_handoff_prompt_and_generated_prompt_are_peek_only(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "handoff-dashboard.sqlite3")
+    proposal = messages.post_message(
+        "backend", "frontend", "proposal", "<script>alert(1)</script>", 4,
+        handoff_prompt="Follow the exact handoff.",
+    )
+    plain = messages.post_message(
+        "uiux", "frontend", "request", "Please inspect the issue", 4
+    )
+    with sqlite3.connect(messages.DB_PATH) as connection:
+        connection.execute(
+            "UPDATE messages SET created_at = ? WHERE id = ?",
+            ("2026-11-06T12:00:00+00:00", proposal["id"]),
+        )
+        connection.execute(
+            "UPDATE messages SET created_at = ? WHERE id = ?",
+            ("2026-11-06T11:00:00+00:00", plain["id"]),
+        )
+
+    payload = dashboard.dashboard_payload()
+    frontend = next(member for member in payload["members"] if member["role"] == "frontend")
+    by_id = {message["id"]: message for message in frontend["unread_messages"]}
+    assert by_id[proposal["id"]]["handoff_prompt"] == "Follow the exact handoff."
+    assert by_id[plain["id"]]["handoff_prompt"] is None
+    assert [message["id"] for message in frontend["unread_messages"]] == [proposal["id"], plain["id"]]
+    with sqlite3.connect(messages.DB_PATH) as connection:
+        read_values = connection.execute(
+            'SELECT id, "read" FROM messages ORDER BY created_at DESC, id DESC'
+        ).fetchall()
+    assert all(value == 0 for _, value in read_values)
+
+    page = dashboard.DASHBOARD_HTML
+    assert 'message.handoff_prompt||`You are the ${role}. Use only the TeamBrain MCP tools. ${message.from_role} says: ${message.body}. Read thread ${message.proposal_id||"(no proposal_id)"}, do what it asks, reply with objection or accept using proposal_id, then mark_read.`' in page
+    assert 'el("p","handoff-prompt",prompt)' in page
+    assert 'link.type="button"' in page
+    assert 'navigator.clipboard.writeText(prompt)' in page
+    assert ".innerHTML" not in page
+    assert "textContent" in page
 
 
 def test_dashboard_session_does_not_authenticate_mcp_route(dashboard_client):
@@ -287,6 +443,7 @@ def test_dashboard_api_includes_standalone_messages_newest_first(tmp_path, monke
         "type": "accept",
         "body": "Standalone accept",
         "contract_version": 1,
+        "handoff_prompt": None,
         "created_at": "2026-11-05T11:00:00+00:00",
     }
     assert payload["proposals"] == []

@@ -94,7 +94,11 @@ class BearerRoleMiddleware:
                 )
                 return
 
-        if path in self.DASHBOARD_PATHS or path.startswith("/api/members/"):
+        if (
+            path in self.DASHBOARD_PATHS
+            or path.startswith("/api/members/")
+            or path.startswith("/api/tasks/")
+        ):
             await self.app(scope, receive, send)
             return
 

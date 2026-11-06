@@ -2,5 +2,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 server/teambrain.sqlite3
+/.teambrain-http.*.log
 .venv/
 .venv-*/

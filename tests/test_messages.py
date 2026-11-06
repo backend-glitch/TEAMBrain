@@ -84,3 +84,41 @@ def test_post_message_stores_contract_version(tmp_path, monkeypatch):
         ).fetchone()[0]
 
     assert contract_version == 7
+
+
+def test_post_message_stores_optional_handoff_prompt(tmp_path, monkeypatch):
+    database_path = tmp_path / "messages.sqlite3"
+    monkeypatch.setattr(messages, "DB_PATH", database_path)
+
+    with_prompt = messages.post_message(
+        "backend", "frontend", "request", "Implement this", 1,
+        handoff_prompt="Use this exact handoff.",
+    )
+    without_prompt = messages.post_message(
+        "backend", "frontend", "request", "Existing callers still work", 1
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT id, handoff_prompt FROM messages ORDER BY created_at, id"
+        ).fetchall()
+    assert (with_prompt["id"], "Use this exact handoff.") in rows
+    assert (without_prompt["id"], None) in rows
+
+
+@pytest.mark.parametrize(
+    "prompt, message",
+    [
+        ("x" * 2001, "at most 2000"),
+        ("bad\x00text", "plain text"),
+    ],
+)
+def test_post_message_rejects_invalid_handoff_prompt(
+    tmp_path, monkeypatch, prompt, message
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
+    with pytest.raises(ValueError, match=message):
+        messages.post_message(
+            "backend", "frontend", "request", "Body", 1,
+            handoff_prompt=prompt,
+        )

@@ -164,11 +164,19 @@ def post_message(
     body: str,
     contract_version: int,
     proposal_id: str | None = None,
+    handoff_prompt: str | None = None,
 ) -> dict[str, str | int | None]:
     """Validate and save a message, returning its ID, timestamp, and thread ID."""
     if type not in VALID_MESSAGE_TYPES:
         allowed = ", ".join(sorted(VALID_MESSAGE_TYPES))
         raise ValueError(f"Invalid message type {type!r}; expected one of: {allowed}")
+    if handoff_prompt is not None:
+        if not isinstance(handoff_prompt, str):
+            raise ValueError("handoff_prompt must be plain text")
+        if len(handoff_prompt) > 2000:
+            raise ValueError("handoff_prompt must be at most 2000 characters")
+        if any(ord(char) < 32 and char not in "\n\r\t" for char in handoff_prompt):
+            raise ValueError("handoff_prompt must be plain text")
 
     message_id = str(uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
@@ -192,8 +200,8 @@ def post_message(
             """
             INSERT INTO messages
                 (id, from_role, to_role, type, body, contract_version,
-                 proposal_id, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 proposal_id, status, handoff_prompt, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -204,6 +212,7 @@ def post_message(
                 contract_version,
                 proposal_id,
                 proposal_status,
+                handoff_prompt,
                 created_at,
             ),
         )
@@ -250,7 +259,7 @@ def check_inbox(
         rows = connection.execute(
             """
             SELECT id, from_role, to_role, type, body, contract_version,
-                   proposal_id, status, decision_note, created_at
+                   proposal_id, status, decision_note, handoff_prompt, created_at
             FROM messages
             WHERE to_role = ? AND "read" = 0
             ORDER BY created_at, id
@@ -359,7 +368,7 @@ def get_thread(proposal_id: str) -> list[dict[str, str | int | None]]:
         rows = connection.execute(
             """
             SELECT id, from_role, to_role, type, body, contract_version,
-                   proposal_id, status, decision_note, "read", created_at
+                   proposal_id, status, decision_note, handoff_prompt, "read", created_at
             FROM messages
             WHERE proposal_id = ?
             ORDER BY created_at, id

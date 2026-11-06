@@ -31,6 +31,7 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 status IS NULL OR status IN ('open', 'accepted', 'escalated', 'rejected')
             ),
             decision_note TEXT,
+            handoff_prompt TEXT,
             created_at TEXT NOT NULL
         );
         """
@@ -83,10 +84,24 @@ def create_tables(connection: sqlite3.Connection) -> None:
             first_seen TEXT,
             last_seen TEXT,
             last_tool TEXT,
-            request_count INTEGER NOT NULL DEFAULT 0
+            request_count INTEGER NOT NULL DEFAULT 0,
+            run_mode TEXT NOT NULL DEFAULT 'manual' CHECK (run_mode IN ('manual', 'headless')),
+            tool_label TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    member_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(members)")
+    }
+    if "run_mode" not in member_columns:
+        connection.execute(
+            "ALTER TABLE members ADD COLUMN run_mode TEXT NOT NULL DEFAULT 'manual' "
+            "CHECK (run_mode IN ('manual', 'headless'))"
+        )
+    if "tool_label" not in member_columns:
+        connection.execute(
+            "ALTER TABLE members ADD COLUMN tool_label TEXT NOT NULL DEFAULT ''"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_status_history_role_created "
         "ON status_history(role, created_at DESC)"
@@ -107,6 +122,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
         )
     if "decision_note" not in message_columns:
         connection.execute("ALTER TABLE messages ADD COLUMN decision_note TEXT")
+    if "handoff_prompt" not in message_columns:
+        connection.execute("ALTER TABLE messages ADD COLUMN handoff_prompt TEXT")
 
     table_sql = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'"
@@ -128,6 +145,7 @@ def create_tables(connection: sqlite3.Connection) -> None:
                     status IS NULL OR status IN ('open', 'accepted', 'escalated', 'rejected')
                 ),
                 decision_note TEXT,
+                handoff_prompt TEXT,
                 created_at TEXT NOT NULL
             )
             """
@@ -136,9 +154,9 @@ def create_tables(connection: sqlite3.Connection) -> None:
             """
             INSERT INTO messages
                 (id, from_role, to_role, type, body, contract_version, "read",
-                 proposal_id, status, decision_note, created_at)
+                 proposal_id, status, decision_note, handoff_prompt, created_at)
             SELECT id, from_role, to_role, type, body, contract_version, "read",
-                   proposal_id, status, decision_note, created_at
+                   proposal_id, status, decision_note, handoff_prompt, created_at
             FROM messages_before_rejection
             """
         )

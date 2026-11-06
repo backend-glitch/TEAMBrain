@@ -11,7 +11,7 @@ TeamBrain: a shared context server so each teammate's AI (UI/UX, frontend, backe
 
 ## Message types
 `request`, `proposal`, `objection`, `accept`
-Every message has: id, from_role, to_role, type, body, contract_version, created_at.
+Every message has: id, from_role, to_role, type, body, contract_version, created_at. Messages may include an optional plain-text `handoff_prompt` of up to 2,000 characters.
 
 ## Rules
 - Keep it simple. Build only what I ask, no extra features.
