@@ -21,6 +21,7 @@ Every message has: id, from_role, to_role, type, body, contract_version, created
 - Breaking changes need human approval, never auto-accept.
 - Write a test for every tool.
 - Update README.md if a decision changes.
+- To ask for or change something, post a proposal. Reply to it with objection or accept using its proposal_id. Don't send loose requests.
 
 ## Structure
 - /server: MCP server

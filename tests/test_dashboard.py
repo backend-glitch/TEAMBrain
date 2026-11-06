@@ -1,8 +1,11 @@
+import sqlite3
+
 import pytest
 from starlette.testclient import TestClient
 
 from server import app as app_module
 from server import dashboard
+from server import messages
 
 
 ORIGIN = "http://127.0.0.1:8000"
@@ -162,6 +165,10 @@ def test_script_message_is_data_and_page_uses_text_content(dashboard_client):
     assert ".innerHTML" not in page
     assert "<script>alert('x')</script>" not in page
     assert 'fetch("/api/dashboard"' in page
+    assert "Recent messages" in page
+    assert "dataset.recent_messages" in page
+    assert "},3000);refresh();" in page
+    assert "Contract v${dataset.contract_version??0}" in page
     assert '"Authorization": `Bearer ${token}`' not in page
     assert "localStorage" not in page
 
@@ -176,3 +183,48 @@ def test_dashboard_session_does_not_authenticate_mcp_route(dashboard_client):
     )
 
     assert response.status_code == 401
+
+
+def test_dashboard_api_includes_standalone_messages_newest_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "dashboard.sqlite3")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_FRONTEND", "frontend-role-token")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_BACKEND", "backend-role-token")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_UIUX", "uiux-role-token")
+    monkeypatch.setenv("TEAMBRAIN_DASHBOARD_TOKEN", "dashboard-only-password")
+    monkeypatch.setenv("TEAMBRAIN_SESSION_SECRET", "test-session-signing-secret")
+
+    older = messages.post_message(
+        "backend", "frontend", "request", "Standalone request", 1
+    )
+    newer = messages.post_message(
+        "uiux", "frontend", "accept", "Standalone accept", 1
+    )
+    with sqlite3.connect(messages.DB_PATH) as connection:
+        connection.execute(
+            "UPDATE messages SET created_at = ? WHERE id = ?",
+            ("2026-11-05T10:00:00+00:00", older["id"]),
+        )
+        connection.execute(
+            "UPDATE messages SET created_at = ? WHERE id = ?",
+            ("2026-11-05T11:00:00+00:00", newer["id"]),
+        )
+
+    app = app_module.create_http_app()
+    with TestClient(app, base_url=ORIGIN) as client:
+        assert login(client).status_code == 200
+        response = client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    payload = response.json()
+    recent = payload["recent_messages"]
+    assert [item["id"] for item in recent] == [newer["id"], older["id"]]
+    assert recent[0] == {
+        "id": newer["id"],
+        "from_role": "uiux",
+        "to_role": "frontend",
+        "type": "accept",
+        "body": "Standalone accept",
+        "contract_version": 1,
+        "created_at": "2026-11-05T11:00:00+00:00",
+    }
+    assert payload["proposals"] == []

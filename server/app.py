@@ -2,6 +2,7 @@
 
 import argparse
 import os
+from typing import Literal
 
 try:
     from mcp.server import MCPServer
@@ -11,11 +12,14 @@ except ImportError:  # Compatibility with MCP SDK v1.
 from server.messages import (
     check_inbox,
     get_thread,
+    get_team_status,
     human_decision,
     list_escalated,
+    log_work as record_work,
     mark_read as mark_read_messages,
     post_message,
     read_contract,
+    set_status as record_status,
     write_contract,
 )
 from server.http_auth import BearerRoleMiddleware, configured_tokens, current_role
@@ -52,10 +56,77 @@ def post_message_tool(
 
 def check_inbox_tool(
     to_role: str, peek: bool = False
-) -> list[dict[str, str | int | None]]:
-    """Read the authenticated role's inbox for HTTP requests."""
+) -> dict[str, object]:
+    """Read unread messages and return a compact status view of teammates."""
     authenticated_role = current_role.get()
-    return check_inbox(to_role=authenticated_role or to_role, peek=peek)
+    role = authenticated_role or to_role
+    team = get_team_status()["roles"]
+    team_status_summary = []
+    for member in team:
+        if member["role"] == role:
+            continue
+        status = member["current_status"]
+        if status is None:
+            team_status_summary.append(
+                {
+                    "role": member["role"],
+                    "state": None,
+                    "summary": "No status posted",
+                    "task": None,
+                }
+            )
+        else:
+            team_status_summary.append(
+                {
+                    "role": member["role"],
+                    "state": status["state"],
+                    "summary": status["summary"],
+                    "task": status["task"],
+                }
+            )
+    return {
+        "messages": check_inbox(to_role=role, peek=peek),
+        "team_status_summary": team_status_summary,
+    }
+
+
+def _status_role(requested_role: str | None) -> str:
+    """Use the token identity in HTTP, with an explicit role for stdio calls."""
+    authenticated_role = current_role.get()
+    role = authenticated_role or requested_role
+    if role is None:
+        raise ValueError("role is required for stdio calls")
+    return role
+
+
+def set_status_tool(
+    summary: str,
+    state: Literal["working", "blocked", "waiting", "done"],
+    task: str,
+    role: str | None = None,
+) -> dict[str, str]:
+    """Set progress for the token role; pass role for unauthenticated stdio."""
+    return record_status(_status_role(role), summary=summary, state=state, task=task)
+
+
+def log_work_tool(
+    summary: str,
+    files: list[str],
+    related_proposal_id: str | None = None,
+    role: str | None = None,
+) -> dict[str, str | list[str] | None]:
+    """Record finished work for the token role; pass role for stdio calls."""
+    return record_work(
+        _status_role(role),
+        summary=summary,
+        files=files,
+        related_proposal_id=related_proposal_id,
+    )
+
+
+def get_team_status_tool() -> dict[str, list[dict[str, object]]]:
+    """Return every role's current status, recent status history, and work log."""
+    return get_team_status()
 
 
 def mark_read_tool(message_ids: list[str]) -> dict[str, list[str]]:
@@ -68,6 +139,9 @@ def mark_read_tool(message_ids: list[str]) -> dict[str, list[str]]:
 
 mcp.tool(name="post_message")(post_message_tool)
 mcp.tool(name="check_inbox")(check_inbox_tool)
+mcp.tool(name="set_status")(set_status_tool)
+mcp.tool(name="log_work")(log_work_tool)
+mcp.tool(name="get_team_status")(get_team_status_tool)
 mcp.tool()(get_thread)
 mcp.tool()(list_escalated)
 mcp.tool()(human_decision)

@@ -16,7 +16,10 @@ Proposal statuses are `open`, `accepted`, `escalated`, and `rejected`.
 
 ## MCP tools
 - `post_message`: validates and stores a typed message for a role with its `contract_version`. An optional `proposal_id` links a reply to an original proposal; standalone proposals start as their own thread root.
-- `check_inbox`: returns unread messages for a role and marks them read; set `peek` to `true` to leave them unread.
+- `check_inbox`: returns `{messages, team_status_summary}`, marks messages read unless `peek` is `true`, and summarizes other roles' current status.
+- `set_status`: stores the latest status and a history entry for a role. States are `working`, `blocked`, `waiting`, and `done`.
+- `log_work`: records completed work, affected files, and an optional related proposal ID.
+- `get_team_status`: returns every role's current status, up to 10 status-history entries, and up to 10 recent work-log entries.
 - `mark_read`: marks the supplied message IDs as read and returns the IDs changed. In HTTP mode, it only marks messages addressed to the authenticated token's role.
 - `read_contract`: returns the latest contract content and version.
 - `write_contract`: stores new contract content at the next version number.
@@ -26,7 +29,9 @@ Proposal statuses are `open`, `accepted`, `escalated`, and `rejected`.
 
 `check_inbox` and `get_thread` include a `warning` field on each message whose `contract_version` is older than the latest contract version.
 
-Storage: SQLite (tables: contracts, messages).
+In HTTP mode, `set_status` and `log_work` use the authenticated token's role. In stdio mode, pass the optional `role` argument to those tools.
+
+Storage: SQLite (tables: contracts, messages, team_status, status_history, work_log).
 
 ## Running the MCP server
 

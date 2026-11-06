@@ -1,5 +1,6 @@
 """Message creation for the TeamBrain MCP server."""
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,8 @@ from server.database import create_tables
 
 DB_PATH = Path(__file__).resolve().parent / "teambrain.sqlite3"
 VALID_MESSAGE_TYPES = {"request", "proposal", "objection", "accept"}
+TEAM_ROLES = ("uiux", "frontend", "backend")
+VALID_STATUS_STATES = {"working", "blocked", "waiting", "done"}
 
 
 def _messages_with_contract_warnings(
@@ -26,6 +29,132 @@ def _messages_with_contract_warnings(
             )
         messages_with_warnings.append(message)
     return messages_with_warnings
+
+
+def set_status(
+    role: str, summary: str, state: str, task: str
+) -> dict[str, str]:
+    """Save a role's latest status and append a status history entry."""
+    if role not in TEAM_ROLES:
+        raise ValueError(f"Invalid role {role!r}; expected one of: {', '.join(TEAM_ROLES)}")
+    if state not in VALID_STATUS_STATES:
+        raise ValueError(
+            f"Invalid state {state!r}; expected one of: "
+            f"{', '.join(sorted(VALID_STATUS_STATES))}"
+        )
+
+    updated_at = datetime.now(timezone.utc).isoformat()
+    status = {
+        "role": role,
+        "summary": summary,
+        "state": state,
+        "task": task,
+        "updated_at": updated_at,
+    }
+    with sqlite3.connect(DB_PATH) as connection:
+        create_tables(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            INSERT INTO team_status (role, summary, state, task, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(role) DO UPDATE SET
+                summary = excluded.summary,
+                state = excluded.state,
+                task = excluded.task,
+                updated_at = excluded.updated_at
+            """,
+            (role, summary, state, task, updated_at),
+        )
+        connection.execute(
+            """
+            INSERT INTO status_history (id, role, summary, state, task, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid4()), role, summary, state, task, updated_at),
+        )
+    return status
+
+
+def log_work(
+    role: str,
+    summary: str,
+    files: list[str],
+    related_proposal_id: str | None = None,
+) -> dict[str, str | list[str] | None]:
+    """Record finished work for a role."""
+    if role not in TEAM_ROLES:
+        raise ValueError(f"Invalid role {role!r}; expected one of: {', '.join(TEAM_ROLES)}")
+    if not isinstance(files, list) or not all(isinstance(path, str) for path in files):
+        raise ValueError("files must be a list of strings")
+
+    entry = {
+        "id": str(uuid4()),
+        "role": role,
+        "summary": summary,
+        "files": files,
+        "related_proposal_id": related_proposal_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(DB_PATH) as connection:
+        create_tables(connection)
+        connection.execute(
+            """
+            INSERT INTO work_log
+                (id, role, summary, files, related_proposal_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry["id"],
+                role,
+                summary,
+                json.dumps(files, ensure_ascii=False),
+                related_proposal_id,
+                entry["created_at"],
+            ),
+        )
+    return entry
+
+
+def get_team_status() -> dict[str, list[dict[str, object]]]:
+    """Return all role statuses, recent status history, and recent work logs."""
+    with sqlite3.connect(DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        create_tables(connection)
+        latest_rows = {
+            row["role"]: dict(row)
+            for row in connection.execute("SELECT * FROM team_status").fetchall()
+        }
+        team = []
+        for role in TEAM_ROLES:
+            history = connection.execute(
+                """
+                SELECT summary, state, task, created_at
+                FROM status_history WHERE role = ?
+                ORDER BY created_at DESC, id DESC LIMIT 10
+                """,
+                (role,),
+            ).fetchall()
+            work_rows = connection.execute(
+                """
+                SELECT id, role, summary, files, related_proposal_id, created_at
+                FROM work_log WHERE role = ?
+                ORDER BY created_at DESC, id DESC LIMIT 10
+                """,
+                (role,),
+            ).fetchall()
+            team.append(
+                {
+                    "role": role,
+                    "current_status": latest_rows.get(role),
+                    "status_history": [dict(row) for row in history],
+                    "work_log": [
+                        {**dict(row), "files": json.loads(row["files"])}
+                        for row in work_rows
+                    ],
+                }
+            )
+    return {"roles": team}
 
 
 def post_message(

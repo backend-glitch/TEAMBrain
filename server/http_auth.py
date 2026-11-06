@@ -52,7 +52,20 @@ class BearerRoleMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if scope.get("path") in self.DASHBOARD_PATHS:
+        path = scope.get("path", "")
+        is_dashboard_api = path == "/api" or path.startswith("/api/")
+        if path == "/dashboard" or is_dashboard_api:
+            forwarded_headers = {key.lower() for key, _ in scope["headers"]}
+            if (
+                b"cf-connecting-ip" in forwarded_headers
+                or b"x-forwarded-for" in forwarded_headers
+            ):
+                await PlainTextResponse("Forbidden", status_code=403)(
+                    scope, receive, send
+                )
+                return
+
+        if path in self.DASHBOARD_PATHS:
             await self.app(scope, receive, send)
             return
 

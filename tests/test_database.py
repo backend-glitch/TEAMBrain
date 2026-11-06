@@ -14,7 +14,13 @@ def test_create_tables_creates_contracts_and_messages():
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-        assert {"contracts", "messages"}.issubset(tables)
+        assert {
+            "contracts",
+            "messages",
+            "team_status",
+            "status_history",
+            "work_log",
+        }.issubset(tables)
 
         contract_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(contracts)")

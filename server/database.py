@@ -35,6 +35,49 @@ def create_tables(connection: sqlite3.Connection) -> None:
         );
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS team_status (
+            role TEXT PRIMARY KEY CHECK (role IN ('uiux', 'frontend', 'backend')),
+            summary TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('working', 'blocked', 'waiting', 'done')),
+            task TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS status_history (
+            id TEXT PRIMARY KEY,
+            role TEXT NOT NULL CHECK (role IN ('uiux', 'frontend', 'backend')),
+            summary TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('working', 'blocked', 'waiting', 'done')),
+            task TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS work_log (
+            id TEXT PRIMARY KEY,
+            role TEXT NOT NULL CHECK (role IN ('uiux', 'frontend', 'backend')),
+            summary TEXT NOT NULL,
+            files TEXT NOT NULL,
+            related_proposal_id TEXT,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_status_history_role_created "
+        "ON status_history(role, created_at DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_work_log_role_created "
+        "ON work_log(role, created_at DESC)"
+    )
     message_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(messages)")
     }

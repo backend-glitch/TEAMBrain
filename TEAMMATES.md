@@ -1,80 +1,86 @@
-# Connecting Cursor and Codex to TeamBrain
+# Connect to TeamBrain over HTTP
 
-This guide connects Cursor and Codex to the same TeamBrain HTTP server. It assumes both apps run on the Windows computer hosting the server.
+This guide is for a teammate who has a TeamBrain role token and the tunnel URL. Use only the section for the client you have. Replace `<TUNNEL_URL>` with the HTTPS tunnel URL, without a trailing slash. The MCP endpoint is `<TUNNEL_URL>/mcp`.
 
-## Shared server URL
+The tunnel URL changes each session. Whenever you receive a new URL, update the `url` line in your client configuration and fully restart that client. The TeamBrain server and tunnel must be running.
 
-Use this Streamable HTTP URL in both clients:
+## 1. Set your token in Windows
 
-```text
-http://127.0.0.1:8000/mcp
-```
+Set a **User variable** named `TEAMBRAIN_TOKEN` on the Windows account that runs your client. Search for **Edit environment variables for your account**, open **Environment Variables**, then add `TEAMBRAIN_TOKEN` under **User variables** with the value `<YOUR_TOKEN>`.
 
-Start the server from the project root in PowerShell:
+PowerShell alternative (replace the placeholder before running):
 
 ```powershell
-.\.venv-win\Scripts\python.exe server\app.py --http
+setx TEAMBRAIN_TOKEN "<YOUR_TOKEN>"
 ```
 
-Keep that process running while using either client. `127.0.0.1` is local to this computer; for clients on other computers, use a reachable tunnel URL and allowlist its hostname with `TEAMBRAIN_ALLOWED_HOSTS`.
+Keep your token private; do not put its real value in this file or a client config. `setx` applies to newly started apps and terminals, not ones that are already open.
 
-## Set the Windows user environment variables
+## 2. Configure Cursor (use this section only if you have Cursor)
 
-TeamBrain authenticates tokens as roles. Use the frontend token for Cursor and the backend token for Codex. The server also reads the UI/UX token if that role is used.
-
-1. In Windows, search for **Edit environment variables for your account** and open it.
-2. Under **User variables**, add or update these variables with the corresponding token values:
-
-   | Variable name | Role / use |
-   | --- | --- |
-   | `TEAMBRAIN_TOKEN_FRONTEND` | Cursor |
-   | `TEAMBRAIN_TOKEN_BACKEND` | Codex |
-   | `TEAMBRAIN_TOKEN_UIUX` | UI/UX clients, if used |
-
-3. Save the changes, then close and reopen Cursor, Codex, and any terminal used to start the server so they inherit the updated environment.
-
-Do not put token values in this file or commit them to the repository.
-
-## Configure Cursor
-
-Create or merge this entry in the project file `.cursor/mcp.json`:
+Create or edit the global file `%USERPROFILE%\.cursor\mcp.json`. If it already contains other servers, merge this entry into its `mcpServers` object:
 
 ```json
 {
   "mcpServers": {
     "teambrain": {
-      "url": "http://127.0.0.1:8000/mcp",
+      "url": "<TUNNEL_URL>/mcp",
       "headers": {
-        "Authorization": "Bearer ${env:TEAMBRAIN_TOKEN_FRONTEND}"
+        "Authorization": "Bearer ${env:TEAMBRAIN_TOKEN}"
       }
     }
   }
 }
 ```
 
-Cursor resolves `${env:NAME}` references in MCP configuration fields, including headers. Restart Cursor after changing `mcp.json` or the environment.
+Cursor resolves `${env:...}` values in remote server headers. Ensure `TEAMBRAIN_TOKEN` is available to Cursor when it starts.
 
-## Configure Codex
+## 3. Configure Codex (use this section only if you have Codex)
 
-Add this table to `%USERPROFILE%\.codex\config.toml`:
+Open `%USERPROFILE%\.codex\config.toml` and add this table. Create the `.codex` folder or file if needed. If `[mcp_servers.teambrain]` already exists, update it instead of adding a duplicate.
 
 ```toml
 [mcp_servers.teambrain]
-url = "http://127.0.0.1:8000/mcp"
-bearer_token_env_var = "TEAMBRAIN_TOKEN_BACKEND"
+url = "<TUNNEL_URL>/mcp"
+bearer_token_env_var = "TEAMBRAIN_TOKEN"
 ```
 
-If the file already has a `[mcp_servers.teambrain]` table for stdio, replace that table instead of adding a duplicate. Restart Codex after changing `config.toml` or the environment.
+Codex reads the bearer token from the named environment variable when it connects.
 
-## Confirm the tools loaded
+## 4. Fully restart and open a new chat
 
-- **Cursor:** Open **Customize → MCPs** and confirm `teambrain` is enabled. In the Cursor CLI, `cursor-agent mcp list` shows server status and `cursor-agent mcp list-tools teambrain` lists its tools.
-- **Codex:** Open **Settings → MCP servers** and confirm `teambrain` is enabled. In the Codex CLI, run `codex mcp list`; in the Codex composer, `/mcp` shows active MCP servers.
-- In either client, ask it to call TeamBrain's `read_contract` tool and report the contract version. A successful response confirms the server is reachable and authenticated.
+After changing the environment variable or MCP configuration:
 
-Role-bound behavior follows the token: Cursor's frontend token identifies messages as `frontend` and scopes its inbox to `frontend`; Codex's backend token does the same for `backend`.
+1. Save the file and close your client completely. On Windows, use **File → Exit** where available, then check the system tray and Task Manager to make sure its processes have exited.
+2. Start the client again. A window reload alone may not pick up a new Windows user environment variable.
+3. Open a **new chat**. In Cursor, select **Agent** mode.
+4. Keep the TeamBrain server and tunnel running.
 
-## References
+## 5. Confirm the tools loaded
+
+- **Cursor:** In the new chat's **Agent** mode, open **Customize → MCPs** and confirm `teambrain` is enabled. Open the tools list and check that TeamBrain tools appear. If it does not connect, open the Output panel and select **MCP Logs**.
+- **Codex desktop:** Open **Settings → MCP servers** and confirm `teambrain` is enabled. Type `/mcp` in the new chat to see connected servers.
+- **Codex CLI:** Run `codex mcp list`; in its TUI, `/mcp` shows active MCP servers.
+
+## 6. Smoke test the token's role
+
+In the new chat, use the TeamBrain tools to post a proposal addressed to `frontend`. Set `from_role` to `uiux` in the call and use a short test body such as `role check`. Then call `get_thread` with the proposal ID. Confirm the saved proposal's `from_role` matches the role that issued your token. The server uses the token's role for the saved sender role, so it can differ from the `from_role` value supplied in the call.
+
+## TeamBrain instructions for AGENTS.md or Cursor rules
+
+Copy this section into the agent's `AGENTS.md` or Cursor rules:
+
+```markdown
+## TeamBrain coordination
+- At the start of every task, call TeamBrain `check_inbox` with `peek=true` and review unread messages for the role authenticated by this client's token. Call `mark_read` only after handling a message.
+- Before replying to a message, read its full thread with `get_thread`.
+- Never post a message as a role other than the one authenticated by this client's token.
+- If a message has a stale-context warning, call `read_contract` first.
+- To ask for or change something, post a proposal. Reply to it with objection or accept using its `proposal_id`. Don't send loose requests.
+- When posting a TeamBrain message, use one of the supported types: `request`, `proposal`, `objection`, or `accept`.
+```
+
+## Official configuration references
 
 - [Cursor MCP configuration](https://cursor.com/docs/mcp)
-- [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
+- [Codex MCP setup and configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)

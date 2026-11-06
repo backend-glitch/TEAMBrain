@@ -52,29 +52,31 @@ DASHBOARD_HTML = """<!doctype html>
   <section id="workspace" class="hidden"><div id="status" role="status"></div>
   <section id="stats" class="stats" aria-label="Proposal counts"></section>
   <nav id="filters" class="filters" aria-label="Filter proposals"></nav>
+  <section class="section"><h2>Recent messages <span id="recent-message-count" class="section-note"></span></h2><div id="recent-messages" class="list"></div></section>
   <section class="section"><h2>Needs human attention <span id="escalated-count" class="section-note"></span></h2><div id="escalated" class="list"></div></section>
   <section class="section"><h2>Proposals <span id="proposal-count" class="section-note"></span></h2><div id="proposals" class="list"></div></section></section>
 </main>
 <script>
   "use strict";
   const statusNode=document.getElementById("status"),loginNode=document.getElementById("login"),workspaceNode=document.getElementById("workspace");
-  const countsNode=document.getElementById("stats"),filtersNode=document.getElementById("filters"),proposalNode=document.getElementById("proposals"),escalatedNode=document.getElementById("escalated");
+  const countsNode=document.getElementById("stats"),filtersNode=document.getElementById("filters"),recentMessagesNode=document.getElementById("recent-messages"),proposalNode=document.getElementById("proposals"),escalatedNode=document.getElementById("escalated");
   let dataset=null,lastSuccess=null,authenticated=false,selectedStatus="all",selectedRole="all";
   function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text==null?"":String(text);return n}
   function roleTag(role){const r=String(role||"unknown").toLowerCase(),known=["uiux","frontend","backend"].includes(r);return el("span",`role role-${known?r:"other"}`,role||"unknown")}
   function relative(value){const t=Date.parse(value||"");if(!Number.isFinite(t))return "time unknown";const sec=Math.max(0,Math.floor((Date.now()-t)/1000));if(sec<60)return "just now";if(sec<3600)return `${Math.floor(sec/60)} min ago`;if(sec<86400)return `${Math.floor(sec/3600)} hr ago`;if(sec<604800)return `${Math.floor(sec/86400)} days ago`;return new Date(t).toLocaleDateString()}
   function makeMessage(m){const item=el("article","message"),meta=el("div","message-meta");meta.append(roleTag(m.from_role),el("span","type",m.type||"message"),el("span","",relative(m.created_at)));if(m.warning)meta.append(el("span","warning","Stale context"));item.append(meta,el("p","message-body",m.body||""));return item}
+  function renderRecentMessages(){const recent=dataset.recent_messages||[];document.getElementById("recent-message-count").textContent=`${recent.length} total`;recentMessagesNode.replaceChildren();if(!recent.length){empty(recentMessagesNode,"No messages yet","Messages sent by the team will appear here.");return}for(const message of recent){const card=el("article","proposal recent-message"),meta=el("div","message-meta");meta.append(roleTag(message.from_role),el("span","sep","→"),roleTag(message.to_role),el("span","type",message.type||"message"),el("span","",relative(message.created_at)),el("span","",`Contract v${message.contract_version}`));card.append(meta,el("p","message-body",message.body||""));recentMessagesNode.append(card)}}
   function makeProposal(p,highlight){const card=el("article",`proposal${highlight?" escalation":""}`),head=el("button","proposal-head");head.type="button";head.setAttribute("aria-expanded","false");const row=el("div","row");row.append(el("span",`status-pill status-${p.status||"open"}`,p.status||"unknown"),el("span","titleline",p.body||p.id));const sub=el("div","subline");sub.append(roleTag(p.from_role),el("span","sep","→"),roleTag(p.to_role),el("span","sep","·"),el("span","",relative(p.created_at)));if(p.thread&&p.thread.some(m=>m.warning))sub.append(el("span","warning","Stale context"));head.append(row,sub);const panel=el("div","thread"),inner=el("div","thread-inner"),timeline=el("div","timeline");for(const m of (p.thread||[]))timeline.append(makeMessage(m));if(!(p.thread||[]).length)timeline.append(el("p","empty","No messages in this thread yet."));inner.append(timeline);panel.append(inner);head.addEventListener("click",()=>{const open=card.classList.toggle("expanded");head.setAttribute("aria-expanded",String(open))});card.append(head,panel);return card}
   function empty(parent,title,detail){const box=el("div","empty");box.append(el("strong","",title),el("span","",detail));parent.append(box)}
   function filtered(){return (dataset?.proposals||[]).filter(p=>(selectedStatus==="all"||p.status===selectedStatus)&&(selectedRole==="all"||p.from_role===selectedRole||p.to_role===selectedRole))}
   function renderFilters(){filtersNode.replaceChildren();const groups=[["Status",["all","open","accepted","escalated","rejected"]],["Role",["all","uiux","frontend","backend"]]];for(let gi=0;gi<groups.length;gi++){const [label,values]=groups[gi];if(gi)filtersNode.append(el("span","filter-gap"));filtersNode.append(el("span","filter-label",label));for(const value of values){const active=(gi===0?selectedStatus:selectedRole)===value,b=el("button",`chip${active?" active":""}`,value==="all"?"All":value);b.type="button";b.addEventListener("click",()=>{if(gi===0)selectedStatus=value;else selectedRole=value;render()});filtersNode.append(b)}}}
-  function render(){if(!dataset)return;const all=dataset.proposals||[],visible=filtered(),counts={open:0,accepted:0,escalated:0,rejected:0};for(const p of all)if(Object.hasOwn(counts,p.status))counts[p.status]++;document.getElementById("version").textContent=`Contract v${dataset.contract_version??0}`;countsNode.replaceChildren();for(const [key,label] of [["open","Open"],["accepted","Accepted"],["escalated","Escalated"],["rejected","Rejected"]]){const box=el("div",`stat ${key}`);box.append(el("span","",label),el("strong","",counts[key]));countsNode.append(box)}renderFilters();const escalated=visible.filter(p=>p.status==="escalated");document.getElementById("escalated-count").textContent=`${escalated.length} ${escalated.length===1?"proposal":"proposals"}`;escalatedNode.replaceChildren();if(escalated.length)for(const p of escalated)escalatedNode.append(makeProposal(p,true));else empty(escalatedNode,"Nothing needs escalation","Escalated proposals will appear here for human review.");document.getElementById("proposal-count").textContent=`${visible.length} shown`;proposalNode.replaceChildren();if(visible.length)for(const p of visible)proposalNode.append(makeProposal(p,false));else empty(proposalNode,"No proposals match","Try another status or role filter.")}
+  function render(){if(!dataset)return;const all=dataset.proposals||[],visible=filtered(),counts={open:0,accepted:0,escalated:0,rejected:0};for(const p of all)if(Object.hasOwn(counts,p.status))counts[p.status]++;document.getElementById("version").textContent=`Contract v${dataset.contract_version??0}`;countsNode.replaceChildren();for(const [key,label] of [["open","Open"],["accepted","Accepted"],["escalated","Escalated"],["rejected","Rejected"]]){const box=el("div",`stat ${key}`);box.append(el("span","",label),el("strong","",counts[key]));countsNode.append(box)}renderFilters();renderRecentMessages();const escalated=visible.filter(p=>p.status==="escalated");document.getElementById("escalated-count").textContent=`${escalated.length} ${escalated.length===1?"proposal":"proposals"}`;escalatedNode.replaceChildren();if(escalated.length)for(const p of escalated)escalatedNode.append(makeProposal(p,true));else empty(escalatedNode,"Nothing needs escalation","Escalated proposals will appear here for human review.");document.getElementById("proposal-count").textContent=`${visible.length} shown`;proposalNode.replaceChildren();if(visible.length)for(const p of visible)proposalNode.append(makeProposal(p,false));else empty(proposalNode,"No proposals match","Try another status or role filter.")}
   function showLogin(message=""){authenticated=false;workspaceNode.classList.add("hidden");document.getElementById("logout").classList.add("hidden");loginNode.classList.remove("hidden");document.getElementById("login-error").textContent=message}
   function showWorkspace(){authenticated=true;loginNode.classList.add("hidden");workspaceNode.classList.remove("hidden");document.getElementById("logout").classList.remove("hidden")}
-  async function refresh(){try{const response=await fetch("/api/dashboard",{credentials:"same-origin"});if(response.status===401){showLogin();return}if(!response.ok)throw new Error("Could not refresh the dashboard.");dataset=await response.json();showWorkspace();render();lastSuccess=Date.now();document.getElementById("updated").textContent="Updated just now";statusNode.textContent="Connected · refreshes every 5 seconds."}catch(_){statusNode.textContent="Could not refresh the dashboard."}}
+  async function refresh(){try{const response=await fetch("/api/dashboard",{credentials:"same-origin"});if(response.status===401){showLogin();return}if(!response.ok)throw new Error("Could not refresh the dashboard.");dataset=await response.json();showWorkspace();render();lastSuccess=Date.now();document.getElementById("updated").textContent="Updated just now";statusNode.textContent="Connected · refreshes every 3 seconds."}catch(_){statusNode.textContent="Could not refresh the dashboard."}}
   document.getElementById("login-form").addEventListener("submit",async event=>{event.preventDefault();const password=document.getElementById("password"),error=document.getElementById("login-error");error.textContent="";try{const response=await fetch("/api/login",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:password.value})});if(response.ok){password.value="";await refresh()}else if(response.status===429)error.textContent="Too many attempts. Please wait a minute and try again.";else error.textContent="Wrong password. Please try again."}catch(_){error.textContent="Wrong password. Please try again."}});
   document.getElementById("logout").addEventListener("click",async()=>{try{await fetch("/api/logout",{method:"POST",credentials:"same-origin"})}finally{dataset=null;showLogin();document.getElementById("password").value=""}});
-  setInterval(()=>{if(authenticated)refresh();if(lastSuccess)document.getElementById("updated").textContent=`Updated ${relative(new Date(lastSuccess).toISOString())}`},5000);refresh();
+  setInterval(()=>{if(authenticated)refresh();if(lastSuccess)document.getElementById("updated").textContent=`Updated ${relative(new Date(lastSuccess).toISOString())}`},3000);refresh();
 </script></body></html>"""
 
 
@@ -86,7 +88,12 @@ def dashboard_payload() -> dict[str, Any]:
     """Return current contract version, proposal threads, and escalated proposals."""
     database_path = Path(messages.DB_PATH)
     if not database_path.exists():
-        return {"contract_version": 0, "proposals": [], "escalated_proposals": []}
+        return {
+            "contract_version": 0,
+            "proposals": [],
+            "escalated_proposals": [],
+            "recent_messages": [],
+        }
 
     with closing(_readonly_connection(database_path)) as connection:
         connection.row_factory = sqlite3.Row
@@ -111,6 +118,13 @@ def dashboard_payload() -> dict[str, Any]:
             ORDER BY created_at, id
             """
         ).fetchall()
+        recent_message_rows = connection.execute(
+            """
+            SELECT id, from_role, to_role, type, body, contract_version, created_at
+            FROM messages
+            ORDER BY created_at DESC, id DESC
+            """
+        ).fetchall()
 
     thread_rows: dict[str, list[sqlite3.Row]] = {}
     for row in message_rows:
@@ -130,6 +144,7 @@ def dashboard_payload() -> dict[str, Any]:
         "escalated_proposals": [
             proposal for proposal in proposals if proposal["status"] == "escalated"
         ],
+        "recent_messages": [dict(row) for row in recent_message_rows],
     }
 
 

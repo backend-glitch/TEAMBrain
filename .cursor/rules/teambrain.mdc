@@ -1,0 +1,6 @@
+---
+description: TeamBrain coordination rules
+alwaysApply: true
+---
+
+- To ask for or change something, post a proposal. Reply to it with objection or accept using its `proposal_id`. Don't send loose requests.
