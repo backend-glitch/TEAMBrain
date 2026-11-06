@@ -6,9 +6,7 @@ from typing import Any
 
 from server.database import create_tables
 from server import messages
-
-
-TEAM_ROLES = ("uiux", "frontend", "backend")
+from server.roles import list_roles, validate_role
 
 
 def _now() -> str:
@@ -39,8 +37,6 @@ def _run_settings(run_mode: str, tool_label: str) -> tuple[str, str]:
 
 def set_profile(role: str, ai_name: str, person_name: str, machine_label: str) -> dict[str, str]:
     """Set the profile belonging to role, without touching activity telemetry."""
-    if role not in TEAM_ROLES:
-        raise ValueError(f"Invalid role {role!r}; expected one of: {', '.join(TEAM_ROLES)}")
     values = {
         "ai_name": _profile_value("ai_name", ai_name),
         "person_name": _profile_value("person_name", person_name),
@@ -48,6 +44,7 @@ def set_profile(role: str, ai_name: str, person_name: str, machine_label: str) -
     }
     with sqlite3.connect(messages.DB_PATH) as connection:
         create_tables(connection)
+        validate_role(connection, role, active_only=False)
         connection.execute(
             """
             INSERT INTO members (role, ai_name, person_name, machine_label)
@@ -64,11 +61,10 @@ def set_profile(role: str, ai_name: str, person_name: str, machine_label: str) -
 
 def set_run_settings(role: str, run_mode: str, tool_label: str) -> dict[str, str]:
     """Set dashboard run-mode metadata; headless execution remains unimplemented."""
-    if role not in TEAM_ROLES:
-        raise ValueError(f"Invalid role {role!r}; expected one of: {', '.join(TEAM_ROLES)}")
     run_mode, tool_label = _run_settings(run_mode, tool_label)
     with sqlite3.connect(messages.DB_PATH) as connection:
         create_tables(connection)
+        validate_role(connection, role, active_only=False)
         connection.execute(
             """
             INSERT INTO members (role, run_mode, tool_label)
@@ -91,8 +87,6 @@ def set_dashboard_member(
     tool_label: str,
 ) -> dict[str, str]:
     """Atomically update a dashboard profile and its run-mode settings."""
-    if role not in TEAM_ROLES:
-        raise ValueError(f"Invalid role {role!r}; expected one of: {', '.join(TEAM_ROLES)}")
     values = {
         "ai_name": _profile_value("ai_name", ai_name),
         "person_name": _profile_value("person_name", person_name),
@@ -101,6 +95,7 @@ def set_dashboard_member(
     run_mode, tool_label = _run_settings(run_mode, tool_label)
     with sqlite3.connect(messages.DB_PATH) as connection:
         create_tables(connection)
+        validate_role(connection, role, active_only=False)
         connection.execute(
             """
             INSERT INTO members (
@@ -128,11 +123,13 @@ def upsert_authenticated_request(
     count_request: bool = True,
 ) -> None:
     """Record activity metadata only; request bodies and tokens are never stored."""
-    if role not in TEAM_ROLES:
-        return
     now = _now()
     with sqlite3.connect(messages.DB_PATH) as connection:
         create_tables(connection)
+        try:
+            validate_role(connection, role)
+        except ValueError:
+            return
         if not count_request:
             connection.execute(
                 """
@@ -167,13 +164,11 @@ def upsert_authenticated_request(
 def dashboard_members(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     """Return a dashboard view for every role, including unseen roles."""
     connection.row_factory = sqlite3.Row
-    try:
-        rows = {
-            row["role"]: dict(row)
-            for row in connection.execute("SELECT * FROM members")
-        }
-    except sqlite3.OperationalError:
-        rows = {}
+    rows = {
+        row["role"]: dict(row)
+        for row in connection.execute("SELECT * FROM members")
+    }
+    role_rows = list_roles(connection)
     sent_counts = {
         row["from_role"]: row["message_count"]
         for row in connection.execute(
@@ -209,11 +204,17 @@ def dashboard_members(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     ):
         unread_messages.setdefault(row["to_role"], []).append(dict(row))
     result = []
-    for role in TEAM_ROLES:
+    for role_metadata in role_rows:
+        role = role_metadata["name"]
         member = rows.get(role, {})
         result.append(
             {
                 "role": role,
+                "description": role_metadata["description"],
+                "color": role_metadata["color"],
+                "active": role_metadata["active"],
+                "token_env_var": role_metadata["token_env_var"],
+                "can_write_contract": role_metadata["can_write_contract"],
                 "ai_name": member.get("ai_name") or f"{role} AI",
                 "person_name": member.get("person_name") or "",
                 "machine_label": member.get("machine_label") or "",

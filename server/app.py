@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import sqlite3
 from typing import Literal
 
 try:
@@ -22,15 +23,19 @@ from server.messages import (
     set_status as record_status,
     write_contract,
 )
+from server.database import create_tables
 from server.http_auth import BearerRoleMiddleware, configured_tokens, current_role
 from server.http_security import transport_security_settings
 from server.members import set_profile as update_profile
+from server.roles import list_roles_tool
 from server.dashboard import (
     dashboard_api,
     dashboard_login,
     dashboard_logout,
     dashboard_page,
     dashboard_send_task,
+    dashboard_create_role,
+    dashboard_set_role_active,
     dashboard_update_member,
 )
 
@@ -158,6 +163,7 @@ mcp.tool(name="check_inbox")(check_inbox_tool)
 mcp.tool(name="set_status")(set_status_tool)
 mcp.tool(name="log_work")(log_work_tool)
 mcp.tool(name="get_team_status")(get_team_status_tool)
+mcp.tool(name="list_roles")(list_roles_tool)
 mcp.tool(name="set_profile")(set_profile_tool)
 mcp.tool()(get_thread)
 mcp.tool()(list_escalated)
@@ -178,14 +184,28 @@ def create_http_app():
     app.add_route("/api/dashboard", dashboard_api, methods=["GET"])
     app.add_route("/api/members/{role}", dashboard_update_member, methods=["POST"])
     app.add_route("/api/tasks/{role}", dashboard_send_task, methods=["POST"])
+    app.add_route("/api/roles", dashboard_create_role, methods=["POST"])
+    app.add_route("/api/roles/{role}/active", dashboard_set_role_active, methods=["POST"])
     app.add_route("/api/login", dashboard_login, methods=["POST"])
     app.add_route("/api/logout", dashboard_logout, methods=["POST"])
+    dashboard_token = os.environ.get("TEAMBRAIN_DASHBOARD_TOKEN")
+    initial_tokens = configured_tokens()
+    if dashboard_token and dashboard_token in initial_tokens.values():
+        raise ValueError("TEAMBRAIN_DASHBOARD_TOKEN must be distinct from role tokens")
     app.add_middleware(
         BearerRoleMiddleware,
-        tokens=configured_tokens(),
-        dashboard_token=os.environ.get("TEAMBRAIN_DASHBOARD_TOKEN"),
+        tokens=None,
+        dashboard_token=dashboard_token,
     )
     return app
+
+
+def initialize_storage() -> None:
+    """Apply schema migrations before starting the stdio transport."""
+    from server.messages import DB_PATH
+
+    with sqlite3.connect(DB_PATH) as connection:
+        create_tables(connection)
 
 
 if __name__ == "__main__":
@@ -208,4 +228,5 @@ if __name__ == "__main__":
 
         uvicorn.run(create_http_app(), host="127.0.0.1", port=8000)
     else:
+        initialize_storage()
         mcp.run(transport="stdio")

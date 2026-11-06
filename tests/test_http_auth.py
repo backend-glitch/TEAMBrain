@@ -78,6 +78,8 @@ def test_forwarded_headers_are_rejected_for_dashboard_and_api_but_not_mcp():
         ("/api/dashboard", {"X-Forwarded-For": "203.0.113.10"}),
         ("/api/login", {"cf-connecting-ip": ""}),
         ("/api/tasks/frontend", {"Cf-Connecting-Ip": "203.0.113.11"}),
+        ("/api/roles", {"X-Forwarded-For": "203.0.113.12"}),
+        ("/api/roles/qa/active", {"Cf-Connecting-Ip": "203.0.113.13"}),
     ):
         events = invoke_middleware(
             middleware, path=path, forwarded_headers=forwarded
@@ -95,16 +97,53 @@ def test_forwarded_headers_are_rejected_for_dashboard_and_api_but_not_mcp():
     assert reached_paths == ["/mcp"]
 
 
-def test_configured_tokens_map_environment_variables_to_roles(monkeypatch):
+def test_configured_tokens_map_environment_variables_to_roles(tmp_path, monkeypatch):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "tokens.sqlite3")
     monkeypatch.setenv("TEAMBRAIN_TOKEN_UIUX", "uiux-secret")
     monkeypatch.setenv("TEAMBRAIN_TOKEN_FRONTEND", "frontend-secret")
     monkeypatch.setenv("TEAMBRAIN_TOKEN_BACKEND", "backend-secret")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_QA", "inactive-role-token")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_DATABASE", "inactive-database-token")
 
     assert configured_tokens() == {
         "uiux": "uiux-secret",
         "frontend": "frontend-secret",
         "backend": "backend-secret",
     }
+
+
+def test_dynamic_active_role_without_token_cannot_connect(tmp_path, monkeypatch):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "dynamic-auth.sqlite3")
+    for name in (
+        "TEAMBRAIN_TOKEN_UIUX", "TEAMBRAIN_TOKEN_FRONTEND", "TEAMBRAIN_TOKEN_BACKEND",
+        "TEAMBRAIN_TOKEN_QA", "TEAMBRAIN_TOKEN_QA2",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    from server.roles import create_role
+
+    create_role("qa2", "QA", "#95d7a5", active=True)
+
+    async def app(scope, receive, send):
+        raise AssertionError("request without a configured role token was accepted")
+
+    middleware = BearerRoleMiddleware(app, tokens=None)
+    events = invoke_middleware(middleware, "Bearer unconfigured-role-token")
+    assert events[0]["status"] == 401
+
+
+def test_inactive_seeded_role_can_be_switched_on_for_token_mapping(tmp_path, monkeypatch):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "role-toggle.sqlite3")
+    for name in (
+        "TEAMBRAIN_TOKEN_UIUX", "TEAMBRAIN_TOKEN_FRONTEND", "TEAMBRAIN_TOKEN_BACKEND",
+        "TEAMBRAIN_TOKEN_QA",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_QA", "qa-role-token")
+
+    assert "qa" not in configured_tokens()
+    with sqlite3.connect(messages.DB_PATH) as connection:
+        connection.execute("UPDATE roles SET active = 1 WHERE name = 'qa'")
+    assert configured_tokens()["qa"] == "qa-role-token"
 
 
 def test_bearer_middleware_sets_role_for_valid_token():

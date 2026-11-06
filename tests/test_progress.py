@@ -16,7 +16,7 @@ def test_set_status_keeps_latest_value_and_recent_history(tmp_path, monkeypatch)
     result = messages.get_team_status()
     roles = {entry["role"]: entry for entry in result["roles"]}
 
-    assert set(roles) == {"uiux", "frontend", "backend"}
+    assert set(roles) == {"uiux", "frontend", "backend", "qa", "database"}
     frontend = roles["frontend"]
     assert frontend["current_status"] == status
     assert len(frontend["status_history"]) == 10
@@ -129,5 +129,17 @@ def test_check_inbox_includes_other_roles_status_summary(tmp_path, monkeypatch):
             "state": "working",
             "summary": "Implementing auth",
             "task": "Session API",
+        },
+        {
+            "role": "qa",
+            "state": None,
+            "summary": "No status posted",
+            "task": None,
+        },
+        {
+            "role": "database",
+            "state": None,
+            "summary": "No status posted",
+            "task": None,
         },
     ]

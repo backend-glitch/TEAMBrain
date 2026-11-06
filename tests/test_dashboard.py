@@ -33,6 +33,10 @@ def dashboard_client(monkeypatch, tmp_path):
     }]
     payload = {
         "contract_version": 1,
+        "roles": [
+            {"name": role, "description": "", "color": "#718091", "active": True}
+            for role in ("uiux", "frontend", "backend")
+        ],
         "proposals": [{
             **thread[0],
             "status": "open",
@@ -327,11 +331,14 @@ def test_dashboard_member_unread_and_waiting_counts_use_unread_inbox_without_mar
 ):
     monkeypatch.setattr(messages, "DB_PATH", tmp_path / "unread-dashboard.sqlite3")
     backend_proposal = messages.post_message(
-        "owner", "backend", "proposal", "Open backend task", 1
+        "owner", "backend", "proposal", "Open backend task", 1,
+        allow_owner=True,
     )
-    messages.post_message("owner", "backend", "request", "Standalone ping", 1)
+    messages.post_message("owner", "backend", "request", "Standalone ping", 1,
+                          allow_owner=True)
     frontend_proposal = messages.post_message(
-        "owner", "frontend", "proposal", "Resolved frontend task", 1
+        "owner", "frontend", "proposal", "Resolved frontend task", 1,
+        allow_owner=True,
     )
     messages.post_message(
         "backend", "frontend", "accept", "Accepted", 1,
@@ -447,3 +454,44 @@ def test_dashboard_api_includes_standalone_messages_newest_first(tmp_path, monke
         "created_at": "2026-11-05T11:00:00+00:00",
     }
     assert payload["proposals"] == []
+
+
+def test_add_role_requires_dashboard_session_and_same_origin(dashboard_client):
+    client, _, _ = dashboard_client
+    payload = {"name": "qa2", "description": "Quality checks", "color": "#95d7a5"}
+    assert client.post(
+        "/api/roles", json=payload, headers={"Origin": ORIGIN}
+    ).status_code == 401
+    assert client.post(
+        "/api/roles", json=payload,
+        headers={"Origin": ORIGIN, "Authorization": "Bearer frontend-role-token"},
+    ).status_code == 401
+
+    assert login(client).status_code == 200
+    assert client.post(
+        "/api/roles", json=payload, headers={"Origin": "https://attacker.example"}
+    ).status_code == 403
+    response = client.post(
+        "/api/roles", json=payload, headers={"Origin": ORIGIN}
+    )
+
+    assert response.status_code == 201
+    role = response.json()
+    assert role["name"] == "qa2"
+    assert role["token_env_var"] == "TEAMBRAIN_TOKEN_QA2"
+    assert "manually" in role["token_setup"]
+    assert set(role) == {
+        "name", "description", "color", "active", "token_env_var",
+        "can_write_contract", "token_setup",
+    }
+
+
+def test_dashboard_add_role_page_uses_dynamic_roles_and_safe_text(dashboard_client):
+    client, _, _ = dashboard_client
+    page = client.get("/dashboard").text
+
+    assert 'id="add-role-form"' in page
+    assert "dataset?.roles" in page
+    assert "Set ${data.token_env_var}" in page
+    assert "The server never generates or stores tokens." in page
+    assert ".innerHTML" not in page

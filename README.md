@@ -16,6 +16,7 @@ Proposal statuses are `open`, `accepted`, `escalated`, and `rejected`.
 
 ## MCP tools
 - `post_message`: validates and stores a typed message for a role with its `contract_version`. An optional `proposal_id` links a reply to an original proposal; standalone proposals start as their own thread root. An optional plain-text `handoff_prompt` (up to 2,000 characters) can provide task-specific instructions.
+- `list_roles`: read-only list of configured roles, descriptions, colors, active flags, and contract-writing capability.
 - `check_inbox`: returns `{messages, team_status_summary}`, marks messages read unless `peek` is `true`, and summarizes other roles' current status.
 - `set_status`: stores the latest status and a history entry for a role. States are `working`, `blocked`, `waiting`, and `done`.
 - `log_work`: records completed work, affected files, and an optional related proposal ID.
@@ -34,7 +35,7 @@ Dashboard role cards show the newest unread message in a “Waiting for you” b
 
 In HTTP mode, `set_status` and `log_work` use the authenticated token's role. In stdio mode, pass the optional `role` argument to those tools.
 
-Storage: SQLite (tables: contracts, messages, team_status, status_history, work_log, members). Member cards support `manual` and `headless` run-mode labels (headless execution is not implemented) plus a free-text tool label. Authenticated MCP requests update per-role client activity metadata and request counts. Tokens and message bodies are never stored in member records. IP addresses and machine labels are exposed only through the dashboard.
+Storage: SQLite (tables: contracts, messages, team_status, status_history, work_log, members, roles). Roles are database-backed; names use lowercase letters and digits, up to 20 characters. The default roles are `uiux`, `frontend`, and `backend`; `qa` and `database` are seeded inactive examples. The owner can activate/deactivate roles and add roles in the dashboard. Adding a role shows the matching `TEAMBRAIN_TOKEN_<ROLE>` environment variable name; the owner generates and configures the token separately. The server never generates or stores role tokens. HTTP authentication reads each active role's configured environment variable and keeps constant-time bearer comparison. Member cards support `manual` and `headless` run-mode labels (headless execution is not implemented) plus a free-text tool label. Authenticated MCP requests update per-role client activity metadata and request counts. Tokens and message bodies are never stored in member records. IP addresses and machine labels are exposed only through the dashboard.
 
 ## Running the MCP server
 
@@ -43,7 +44,7 @@ From the project root, start the server with the project's Python environment:
 - Stdio (default): `python server/app.py` or `python server/app.py --stdio`
 - Streamable HTTP: `python server/app.py --http` (listens on `http://127.0.0.1:8000/mcp`)
 
-HTTP mode requires bearer tokens configured through `TEAMBRAIN_TOKEN_UIUX`, `TEAMBRAIN_TOKEN_FRONTEND`, and `TEAMBRAIN_TOKEN_BACKEND`. Each configured token authenticates as its matching role. Requests without a valid token receive HTTP 401. For HTTP calls, `post_message` uses the token's role as `from_role`, and `check_inbox` reads only that role's inbox. Optional `TEAMBRAIN_ALLOWED_HOSTS` accepts comma-separated hostnames for tunnel access; DNS rebinding protection stays enabled.
+HTTP mode reads the token environment variable named by each active row in `roles`. The seeded variables are `TEAMBRAIN_TOKEN_UIUX`, `TEAMBRAIN_TOKEN_FRONTEND`, and `TEAMBRAIN_TOKEN_BACKEND`; roles without a token configured cannot authenticate. Each configured token maps to its database role and is compared in constant time. Requests without an active role token receive HTTP 401. For HTTP calls, `post_message` uses the token's role as `from_role`, and `check_inbox` reads only that role's inbox. Optional `TEAMBRAIN_ALLOWED_HOSTS` accepts comma-separated hostnames for tunnel access; DNS rebinding protection stays enabled.
 
 The dashboard is available at `http://127.0.0.1:8000/dashboard`, with JSON at `/api/dashboard`. The page requires the separate `TEAMBRAIN_DASHBOARD_TOKEN` password and uses a signed session cookie; role tokens are not accepted there. The Team section shows connection status, client and machine metadata, last tool, request and unread counts, run mode, tool label, and messages sent for each role. The owner can edit names and settings, copy role prompts, and send owner-authored task proposals. Headless mode is labeled as coming soon. Requests forwarded through a tunnel are rejected for the dashboard so IP and machine details remain local.
 

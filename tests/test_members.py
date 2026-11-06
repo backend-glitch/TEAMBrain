@@ -57,8 +57,8 @@ def test_dashboard_members_includes_all_roles_and_default_names(tmp_path, monkey
         create_tables(connection)
         members = dashboard_members(connection)
 
-    assert [member["role"] for member in members] == ["uiux", "frontend", "backend"]
+    assert [member["role"] for member in members] == ["uiux", "frontend", "backend", "qa", "database"]
     assert [member["ai_name"] for member in members] == [
-        "uiux AI", "frontend AI", "backend AI"
+        "uiux AI", "frontend AI", "backend AI", "qa AI", "database AI"
     ]
     assert all(member["last_seen"] is None for member in members)

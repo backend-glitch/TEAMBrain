@@ -9,7 +9,7 @@ def test_check_inbox_returns_and_marks_only_matching_unread_messages(
     database_path = tmp_path / "messages.sqlite3"
     monkeypatch.setattr(messages, "DB_PATH", database_path)
     first = messages.post_message("backend", "frontend", "request", "First", 1)
-    messages.post_message("design", "backend", "proposal", "Other role", 1)
+    messages.post_message("uiux", "backend", "proposal", "Other role", 1)
 
     inbox = messages.check_inbox("frontend")
 
@@ -58,7 +58,7 @@ def test_check_inbox_peek_leaves_messages_unread(tmp_path, monkeypatch):
 def test_mark_read_marks_only_requested_unread_messages(tmp_path, monkeypatch):
     monkeypatch.setattr(messages, "DB_PATH", tmp_path / "messages.sqlite3")
     first = messages.post_message("backend", "frontend", "request", "First", 1)
-    second = messages.post_message("design", "frontend", "request", "Second", 1)
+    second = messages.post_message("uiux", "frontend", "request", "Second", 1)
 
     result = messages.mark_read([first["id"], "missing-id"])
 

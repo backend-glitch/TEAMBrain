@@ -21,6 +21,7 @@ def test_create_tables_creates_contracts_and_messages():
             "status_history",
             "work_log",
             "members",
+            "roles",
         }.issubset(tables)
 
         contract_columns = {
@@ -68,6 +69,16 @@ def test_create_tables_creates_contracts_and_messages():
         }
         assert member_defaults["run_mode"] == "'manual'"
         assert member_defaults["tool_label"] == "''"
+        role_rows = connection.execute(
+            "SELECT name, active, token_env_var, can_write_contract FROM roles ORDER BY rowid"
+        ).fetchall()
+        assert role_rows == [
+            ("uiux", 1, "TEAMBRAIN_TOKEN_UIUX", 0),
+            ("frontend", 1, "TEAMBRAIN_TOKEN_FRONTEND", 0),
+            ("backend", 1, "TEAMBRAIN_TOKEN_BACKEND", 1),
+            ("qa", 0, "TEAMBRAIN_TOKEN_QA", 0),
+            ("database", 0, "TEAMBRAIN_TOKEN_DATABASE", 0),
+        ]
     finally:
         connection.close()
 

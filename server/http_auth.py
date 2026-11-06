@@ -3,6 +3,7 @@
 import hmac
 import json
 import os
+import sqlite3
 from contextvars import ContextVar
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -10,11 +11,6 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 current_role: ContextVar[str | None] = ContextVar("teambrain_current_role", default=None)
 
-TOKEN_ENV_BY_ROLE = {
-    "uiux": "TEAMBRAIN_TOKEN_UIUX",
-    "frontend": "TEAMBRAIN_TOKEN_FRONTEND",
-    "backend": "TEAMBRAIN_TOKEN_BACKEND",
-}
 MAX_METADATA_BODY_SIZE = 256 * 1024
 
 
@@ -46,10 +42,18 @@ def _mcp_request_metadata(body: bytes) -> tuple[str | None, str | None, str | No
 
 
 def configured_tokens() -> dict[str, str]:
-    """Load configured role tokens, omitting unset or empty values."""
+    """Load tokens for active database roles, omitting unset values."""
+    from server.database import create_tables
+    from server.messages import DB_PATH
+
+    with sqlite3.connect(DB_PATH) as connection:
+        create_tables(connection)
+        role_environment = connection.execute(
+            "SELECT name, token_env_var FROM roles WHERE active = 1 ORDER BY rowid"
+        ).fetchall()
     return {
         role: token
-        for role, variable in TOKEN_ENV_BY_ROLE.items()
+        for role, variable in role_environment
         if (token := os.environ.get(variable))
     }
 
@@ -62,18 +66,19 @@ class BearerRoleMiddleware:
         "/api/dashboard",
         "/api/login",
         "/api/logout",
+        "/api/roles",
     }
 
     def __init__(
         self,
         app: ASGIApp,
-        tokens: dict[str, str],
+        tokens: dict[str, str] | None = None,
         dashboard_token: str | None = None,
     ):
         self.app = app
         self.tokens = tokens
         self.dashboard_token = dashboard_token
-        if dashboard_token and dashboard_token in tokens.values():
+        if dashboard_token and tokens and dashboard_token in tokens.values():
             raise ValueError("TEAMBRAIN_DASHBOARD_TOKEN must be distinct from role tokens")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -98,15 +103,17 @@ class BearerRoleMiddleware:
             path in self.DASHBOARD_PATHS
             or path.startswith("/api/members/")
             or path.startswith("/api/tasks/")
+            or path.startswith("/api/roles/")
         ):
             await self.app(scope, receive, send)
             return
 
         presented_token = self._bearer_token(scope)
+        token_map = self.tokens if self.tokens is not None else configured_tokens()
         role = next(
             (
                 candidate_role
-                for candidate_role, expected_token in self.tokens.items()
+                for candidate_role, expected_token in token_map.items()
                 if self._matches(presented_token, expected_token)
             ),
             None,

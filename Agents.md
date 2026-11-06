@@ -13,6 +13,11 @@ TeamBrain: a shared context server so each teammate's AI (UI/UX, frontend, backe
 `request`, `proposal`, `objection`, `accept`
 Every message has: id, from_role, to_role, type, body, contract_version, created_at. Messages may include an optional plain-text `handoff_prompt` of up to 2,000 characters.
 
+## Roles
+- Roles are stored in the `roles` table and use 1–20 lowercase letters or digits.
+- HTTP tokens are mapped only from active roles' configured environment variables. Never store or display token values.
+- Validate roles against the database; do not add hard-coded role lists.
+
 ## Rules
 - Keep it simple. Build only what I ask, no extra features.
 - Work in small steps and explain what you changed.

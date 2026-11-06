@@ -8,10 +8,10 @@ from typing import Literal
 from uuid import uuid4
 
 from server.database import create_tables
+from server.roles import list_roles, validate_role
 
 DB_PATH = Path(__file__).resolve().parent / "teambrain.sqlite3"
 VALID_MESSAGE_TYPES = {"request", "proposal", "objection", "accept"}
-TEAM_ROLES = ("uiux", "frontend", "backend")
 VALID_STATUS_STATES = {"working", "blocked", "waiting", "done"}
 
 
@@ -35,8 +35,6 @@ def set_status(
     role: str, summary: str, state: str, task: str
 ) -> dict[str, str]:
     """Save a role's latest status and append a status history entry."""
-    if role not in TEAM_ROLES:
-        raise ValueError(f"Invalid role {role!r}; expected one of: {', '.join(TEAM_ROLES)}")
     if state not in VALID_STATUS_STATES:
         raise ValueError(
             f"Invalid state {state!r}; expected one of: "
@@ -53,6 +51,7 @@ def set_status(
     }
     with sqlite3.connect(DB_PATH) as connection:
         create_tables(connection)
+        validate_role(connection, role)
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
             """
@@ -83,8 +82,6 @@ def log_work(
     related_proposal_id: str | None = None,
 ) -> dict[str, str | list[str] | None]:
     """Record finished work for a role."""
-    if role not in TEAM_ROLES:
-        raise ValueError(f"Invalid role {role!r}; expected one of: {', '.join(TEAM_ROLES)}")
     if not isinstance(files, list) or not all(isinstance(path, str) for path in files):
         raise ValueError("files must be a list of strings")
 
@@ -98,6 +95,7 @@ def log_work(
     }
     with sqlite3.connect(DB_PATH) as connection:
         create_tables(connection)
+        validate_role(connection, role)
         connection.execute(
             """
             INSERT INTO work_log
@@ -121,12 +119,14 @@ def get_team_status() -> dict[str, list[dict[str, object]]]:
     with sqlite3.connect(DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
         create_tables(connection)
+        role_rows = list_roles(connection)
         latest_rows = {
             row["role"]: dict(row)
             for row in connection.execute("SELECT * FROM team_status").fetchall()
         }
         team = []
-        for role in TEAM_ROLES:
+        for role_metadata in role_rows:
+            role = role_metadata["name"]
             history = connection.execute(
                 """
                 SELECT summary, state, task, created_at
@@ -146,6 +146,9 @@ def get_team_status() -> dict[str, list[dict[str, object]]]:
             team.append(
                 {
                     "role": role,
+                    "description": role_metadata["description"],
+                    "color": role_metadata["color"],
+                    "active": role_metadata["active"],
                     "current_status": latest_rows.get(role),
                     "status_history": [dict(row) for row in history],
                     "work_log": [
@@ -165,6 +168,8 @@ def post_message(
     contract_version: int,
     proposal_id: str | None = None,
     handoff_prompt: str | None = None,
+    *,
+    allow_owner: bool = False,
 ) -> dict[str, str | int | None]:
     """Validate and save a message, returning its ID, timestamp, and thread ID."""
     if type not in VALID_MESSAGE_TYPES:
@@ -183,6 +188,9 @@ def post_message(
 
     with sqlite3.connect(DB_PATH) as connection:
         create_tables(connection)
+        if not (allow_owner and from_role == "owner"):
+            validate_role(connection, from_role)
+        validate_role(connection, to_role)
         if proposal_id is None and type == "proposal":
             proposal_id = message_id
         elif proposal_id is not None:
@@ -253,6 +261,7 @@ def check_inbox(
     with sqlite3.connect(DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
         create_tables(connection)
+        validate_role(connection, to_role)
         latest_version = connection.execute(
             "SELECT COALESCE(MAX(version), 0) FROM contracts"
         ).fetchone()[0]
