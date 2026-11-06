@@ -1,6 +1,13 @@
-"""SQLite schema setup for TeamBrain."""
+"""SQLite and PostgreSQL schema setup for TeamBrain."""
 
 import sqlite3
+
+from server.storage import (
+    is_postgres,
+    mark_postgres_schema_ready,
+    postgres_schema_lock,
+    postgres_schema_ready,
+)
 
 
 ROLE_SEEDS = (
@@ -37,8 +44,113 @@ def _rebuild_role_table(
     connection.execute(f'DROP TABLE "{old_table}"')
 
 
+def _create_postgres_tables(connection) -> None:
+    """Create or additively migrate the schema on a PostgreSQL database."""
+    statements = (
+        """CREATE TABLE IF NOT EXISTS contracts (
+            id TEXT PRIMARY KEY, version INTEGER NOT NULL, content TEXT NOT NULL,
+            updated_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS roles (
+            name TEXT PRIMARY KEY UNIQUE CHECK (
+                length(name) BETWEEN 1 AND 20 AND name !~ '[^a-z0-9]'),
+            description TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '#718091',
+            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+            token_env_var TEXT NOT NULL UNIQUE,
+            can_write_contract INTEGER NOT NULL DEFAULT 0 CHECK (can_write_contract IN (0, 1)))""",
+        """CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY, from_role TEXT NOT NULL, to_role TEXT NOT NULL,
+            type TEXT NOT NULL, body TEXT NOT NULL, contract_version INTEGER NOT NULL,
+            "read" INTEGER NOT NULL DEFAULT 0, proposal_id TEXT,
+            status TEXT CHECK (status IS NULL OR status IN ('open', 'accepted', 'escalated', 'rejected')),
+            decision_note TEXT, handoff_prompt TEXT, created_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS team_status (
+            role TEXT PRIMARY KEY, summary TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('working', 'blocked', 'waiting', 'done')),
+            task TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS status_history (
+            id TEXT PRIMARY KEY, role TEXT NOT NULL, summary TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('working', 'blocked', 'waiting', 'done')),
+            task TEXT NOT NULL, created_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS work_log (
+            id TEXT PRIMARY KEY, role TEXT NOT NULL, summary TEXT NOT NULL,
+            files TEXT NOT NULL, related_proposal_id TEXT, created_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS members (
+            role TEXT PRIMARY KEY, ai_name TEXT, person_name TEXT, machine_label TEXT,
+            client_name TEXT, client_version TEXT, last_ip TEXT, first_seen TEXT,
+            last_seen TEXT, last_tool TEXT, request_count INTEGER NOT NULL DEFAULT 0,
+            run_mode TEXT NOT NULL DEFAULT 'manual' CHECK (run_mode IN ('manual', 'headless')),
+            tool_label TEXT NOT NULL DEFAULT '')""",
+        """CREATE TABLE IF NOT EXISTS dashboard_users (
+            username TEXT PRIMARY KEY UNIQUE, password_hash TEXT NOT NULL,
+            role_scope TEXT NOT NULL CHECK (role_scope IN ('owner', 'member')),
+            linked_role TEXT, created_at TEXT NOT NULL,
+            disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+            CHECK ((role_scope = 'owner' AND linked_role IS NULL) OR
+                   (role_scope = 'member' AND linked_role IS NOT NULL)))""",
+        """CREATE TABLE IF NOT EXISTS dashboard_settings (
+            name TEXT PRIMARY KEY, value TEXT NOT NULL)""",
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+    # Keep additive migrations safe for databases created by older releases.
+    connection.execute(
+        "ALTER TABLE members ADD COLUMN IF NOT EXISTS run_mode TEXT NOT NULL DEFAULT 'manual'"
+    )
+    connection.execute(
+        "ALTER TABLE members ADD COLUMN IF NOT EXISTS tool_label TEXT NOT NULL DEFAULT ''"
+    )
+    for column, definition in (
+        ("proposal_id", "TEXT"),
+        ("status", "TEXT"),
+        ("decision_note", "TEXT"),
+        ("handoff_prompt", "TEXT"),
+    ):
+        connection.execute(
+            f"ALTER TABLE messages ADD COLUMN IF NOT EXISTS {column} {definition}"
+        )
+    connection.executemany(
+        """INSERT INTO roles
+           (name, description, color, active, token_env_var, can_write_contract)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (name) DO NOTHING""",
+        ROLE_SEEDS,
+    )
+    connection.execute(
+        "INSERT INTO dashboard_settings (name, value) "
+        "VALUES ('fallback_owner_enabled', '1') ON CONFLICT (name) DO NOTHING"
+    )
+    connection.execute(
+        "UPDATE messages SET proposal_id = id WHERE type = 'proposal' AND proposal_id IS NULL"
+    )
+    connection.execute(
+        "UPDATE messages SET status = 'open' "
+        "WHERE type = 'proposal' AND proposal_id = id AND status IS NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_status_history_role_created "
+        "ON status_history(role, created_at DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_work_log_role_created "
+        "ON work_log(role, created_at DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_proposal_id ON messages(proposal_id)"
+    )
+
+
 def create_tables(connection: sqlite3.Connection) -> None:
-    """Create the contracts and messages tables if they do not exist."""
+    """Create the application schema for the selected database backend."""
+    if is_postgres(connection):
+        if postgres_schema_ready():
+            return
+        with postgres_schema_lock():
+            if not postgres_schema_ready():
+                _create_postgres_tables(connection)
+                connection.commit()
+                mark_postgres_schema_ready()
+        return
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS contracts (
@@ -143,6 +255,34 @@ def create_tables(connection: sqlite3.Connection) -> None:
             tool_label TEXT NOT NULL DEFAULT ''
         )
         """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dashboard_users (
+            username TEXT PRIMARY KEY UNIQUE,
+            password_hash TEXT NOT NULL,
+            role_scope TEXT NOT NULL CHECK (role_scope IN ('owner', 'member')),
+            linked_role TEXT,
+            created_at TEXT NOT NULL,
+            disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+            CHECK (
+                (role_scope = 'owner' AND linked_role IS NULL) OR
+                (role_scope = 'member' AND linked_role IS NOT NULL)
+            )
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dashboard_settings (
+            name TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO dashboard_settings (name, value) "
+        "VALUES ('fallback_owner_enabled', '1')"
     )
     member_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(members)")

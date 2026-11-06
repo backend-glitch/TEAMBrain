@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from server.database import create_tables
-from server import messages
 from server.roles import list_roles, validate_role
+from server.storage import connect
 
 
 def _now() -> str:
@@ -42,7 +42,7 @@ def set_profile(role: str, ai_name: str, person_name: str, machine_label: str) -
         "person_name": _profile_value("person_name", person_name),
         "machine_label": _profile_value("machine_label", machine_label),
     }
-    with sqlite3.connect(messages.DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         validate_role(connection, role, active_only=False)
         connection.execute(
@@ -62,7 +62,7 @@ def set_profile(role: str, ai_name: str, person_name: str, machine_label: str) -
 def set_run_settings(role: str, run_mode: str, tool_label: str) -> dict[str, str]:
     """Set dashboard run-mode metadata; headless execution remains unimplemented."""
     run_mode, tool_label = _run_settings(run_mode, tool_label)
-    with sqlite3.connect(messages.DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         validate_role(connection, role, active_only=False)
         connection.execute(
@@ -93,7 +93,7 @@ def set_dashboard_member(
         "machine_label": _profile_value("machine_label", machine_label),
     }
     run_mode, tool_label = _run_settings(run_mode, tool_label)
-    with sqlite3.connect(messages.DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         validate_role(connection, role, active_only=False)
         connection.execute(
@@ -124,7 +124,7 @@ def upsert_authenticated_request(
 ) -> None:
     """Record activity metadata only; request bodies and tokens are never stored."""
     now = _now()
-    with sqlite3.connect(messages.DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         try:
             validate_role(connection, role)
@@ -161,48 +161,53 @@ def upsert_authenticated_request(
         )
 
 
-def dashboard_members(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+def dashboard_members(
+    connection: sqlite3.Connection,
+    *,
+    role_rows: list[dict[str, Any]] | None = None,
+    messages: list[sqlite3.Row] | None = None,
+) -> list[dict[str, Any]]:
     """Return a dashboard view for every role, including unseen roles."""
     connection.row_factory = sqlite3.Row
     rows = {
         row["role"]: dict(row)
         for row in connection.execute("SELECT * FROM members")
     }
-    role_rows = list_roles(connection)
-    sent_counts = {
-        row["from_role"]: row["message_count"]
-        for row in connection.execute(
-            "SELECT from_role, COUNT(*) AS message_count FROM messages GROUP BY from_role"
-        )
-    }
-    unread_counts = {
-        row["to_role"]: row["message_count"]
-        for row in connection.execute(
-            'SELECT to_role, COUNT(*) AS message_count FROM messages WHERE "read" = 0 GROUP BY to_role'
-        )
-    }
-    waiting_roles = {
-        row["to_role"]
-        for row in connection.execute(
-            """
-            SELECT DISTINCT unread.to_role
-            FROM messages AS unread
-            JOIN messages AS proposal
-              ON proposal.id = unread.proposal_id
-             AND proposal.type = 'proposal'
-             AND proposal.status = 'open'
-            WHERE unread."read" = 0
-            """
-        )
+    role_rows = role_rows if role_rows is not None else list_roles(connection)
+    if messages is None:
+        messages = connection.execute(
+            '''SELECT id, from_role, to_role, type, body, contract_version,
+                      proposal_id, status, "read", handoff_prompt, created_at
+               FROM messages ORDER BY created_at, id'''
+        ).fetchall()
+    sent_counts: dict[str, int] = {}
+    unread_counts: dict[str, int] = {}
+    open_proposals = {
+        row["id"]
+        for row in messages
+        if row["type"] == "proposal" and row["status"] == "open"
     }
     unread_messages: dict[str, list[dict[str, Any]]] = {}
-    for row in connection.execute(
-        '''SELECT id, from_role, to_role, type, body, contract_version,
-                  proposal_id, handoff_prompt, created_at
-           FROM messages WHERE "read" = 0
-           ORDER BY created_at DESC, id DESC'''
-    ):
-        unread_messages.setdefault(row["to_role"], []).append(dict(row))
+    waiting_roles = set()
+    for row in messages:
+        sent_counts[row["from_role"]] = sent_counts.get(row["from_role"], 0) + 1
+        if not row["read"]:
+            unread_counts[row["to_role"]] = unread_counts.get(row["to_role"], 0) + 1
+            if row["proposal_id"] in open_proposals:
+                waiting_roles.add(row["to_role"])
+            unread_messages.setdefault(row["to_role"], []).append(
+                {
+                    key: row[key]
+                    for key in (
+                        "id", "from_role", "to_role", "type", "body",
+                        "contract_version", "proposal_id", "handoff_prompt", "created_at",
+                    )
+                }
+            )
+    for rows_for_role in unread_messages.values():
+        rows_for_role.sort(
+            key=lambda row: (row["created_at"], row["id"]), reverse=True
+        )
     result = []
     for role_metadata in role_rows:
         role = role_metadata["name"]

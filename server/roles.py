@@ -3,10 +3,10 @@
 import re
 import sqlite3
 from contextlib import closing
-from pathlib import Path
 from typing import Any
 
 from server.database import create_tables
+from server.storage import connect, is_integrity_error
 
 
 ROLE_NAME = re.compile(r"^[a-z0-9]{1,20}$")
@@ -36,10 +36,7 @@ def list_roles(connection: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def list_roles_tool() -> list[dict[str, Any]]:
     """Read-only MCP view of configured roles."""
-    from server.messages import DB_PATH
-
-    uri = f"{Path(DB_PATH).resolve().as_uri()}?mode=ro"
-    with closing(sqlite3.connect(uri, uri=True)) as connection:
+    with closing(connect(readonly=True)) as connection:
         return list_roles(connection)
 
 
@@ -47,8 +44,6 @@ def create_role(
     name: str, description: str, color: str, *, active: bool = True
 ) -> dict[str, Any]:
     """Create a role and return the token environment variable name only."""
-    from server.messages import DB_PATH
-
     if not isinstance(name, str) or not ROLE_NAME.fullmatch(name):
         raise ValueError("Role name must contain 1–20 lowercase letters or digits.")
     if not isinstance(description, str) or len(description) > 200:
@@ -60,7 +55,7 @@ def create_role(
     if not isinstance(active, bool):
         raise ValueError("active must be a boolean.")
     token_env_var = f"TEAMBRAIN_TOKEN_{name.upper()}"
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         try:
             connection.execute(
@@ -69,7 +64,9 @@ def create_role(
                    VALUES (?, ?, ?, ?, ?, 0)""",
                 (name, description.strip(), color.lower(), int(active), token_env_var),
             )
-        except sqlite3.IntegrityError as error:
+        except Exception as error:
+            if not is_integrity_error(error):
+                raise
             raise ValueError(f"Role {name!r} already exists.") from error
     return {
         "name": name,
@@ -84,11 +81,9 @@ def create_role(
 
 def set_role_active(name: str, active: bool) -> dict[str, Any]:
     """Enable or disable a role for HTTP authentication."""
-    from server.messages import DB_PATH
-
     if not isinstance(active, bool):
         raise ValueError("active must be a boolean.")
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         cursor = connection.execute(
             "UPDATE roles SET active = ? WHERE name = ?", (int(active), name)

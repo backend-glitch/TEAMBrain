@@ -1,6 +1,7 @@
 """Message creation for the TeamBrain MCP server."""
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,8 +10,16 @@ from uuid import uuid4
 
 from server.database import create_tables
 from server.roles import list_roles, validate_role
+from server.storage import begin_write, connect, is_postgres
 
-DB_PATH = Path(__file__).resolve().parent / "teambrain.sqlite3"
+_configured_db_path = os.environ.get("TEAMBRAIN_DB")
+DB_PATH = (
+    Path(_configured_db_path).expanduser()
+    if _configured_db_path
+    else Path(__file__).resolve().parent / "teambrain.sqlite3"
+)
+if not DB_PATH.is_absolute():
+    raise ValueError("TEAMBRAIN_DB must be an absolute filesystem path")
 VALID_MESSAGE_TYPES = {"request", "proposal", "objection", "accept"}
 VALID_STATUS_STATES = {"working", "blocked", "waiting", "done"}
 
@@ -49,10 +58,10 @@ def set_status(
         "task": task,
         "updated_at": updated_at,
     }
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         validate_role(connection, role)
-        connection.execute("BEGIN IMMEDIATE")
+        begin_write(connection)
         connection.execute(
             """
             INSERT INTO team_status (role, summary, state, task, updated_at)
@@ -93,7 +102,7 @@ def log_work(
         "related_proposal_id": related_proposal_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         validate_role(connection, role)
         connection.execute(
@@ -116,7 +125,7 @@ def log_work(
 
 def get_team_status() -> dict[str, list[dict[str, object]]]:
     """Return all role statuses, recent status history, and recent work logs."""
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         connection.row_factory = sqlite3.Row
         create_tables(connection)
         role_rows = list_roles(connection)
@@ -186,8 +195,10 @@ def post_message(
     message_id = str(uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
+        if is_postgres(connection):
+            begin_write(connection)
         if not (allow_owner and from_role == "owner"):
             validate_role(connection, from_role)
         validate_role(connection, to_role)
@@ -258,7 +269,7 @@ def check_inbox(
     to_role: str, peek: bool = False
 ) -> list[dict[str, str | int | None]]:
     """Return unread messages; peek leaves them unread."""
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         connection.row_factory = sqlite3.Row
         create_tables(connection)
         validate_role(connection, to_role)
@@ -296,7 +307,7 @@ def mark_read(
     parameters: list[str] = list(message_ids)
     if to_role is not None:
         parameters.append(to_role)
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         unread_ids = [
             row[0]
@@ -323,7 +334,7 @@ def mark_read(
 
 def read_contract() -> dict[str, str | int] | None:
     """Return the contract with the highest version, if one has been stored."""
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         connection.row_factory = sqlite3.Row
         create_tables(connection)
         row = connection.execute(
@@ -343,9 +354,9 @@ def write_contract(content: str) -> dict[str, str | int]:
     contract_id = str(uuid4())
     updated_at = datetime.now(timezone.utc).isoformat()
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
-        connection.execute("BEGIN IMMEDIATE")
+        begin_write(connection)
         latest_version = connection.execute(
             "SELECT COALESCE(MAX(version), 0) FROM contracts"
         ).fetchone()[0]
@@ -368,7 +379,7 @@ def write_contract(content: str) -> dict[str, str | int]:
 
 def get_thread(proposal_id: str) -> list[dict[str, str | int | None]]:
     """Return the proposal and its replies in chronological order."""
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         connection.row_factory = sqlite3.Row
         create_tables(connection)
         latest_version = connection.execute(
@@ -390,7 +401,7 @@ def get_thread(proposal_id: str) -> list[dict[str, str | int | None]]:
 
 def list_escalated() -> list[dict[str, str | int | list[dict[str, str]]]]:
     """List unresolved escalated proposals with concise role-based positions."""
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         connection.row_factory = sqlite3.Row
         create_tables(connection)
         proposals = connection.execute(
@@ -447,9 +458,9 @@ def human_decision(
         raise ValueError("decision must be 'accept' or 'reject'")
 
     status = "accepted" if decision == "accept" else "rejected"
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
-        connection.execute("BEGIN IMMEDIATE")
+        begin_write(connection)
         proposal = connection.execute(
             "SELECT status FROM messages WHERE id = ? AND type = 'proposal'",
             (proposal_id,),

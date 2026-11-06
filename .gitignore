@@ -5,3 +5,12 @@ server/teambrain.sqlite3
 /.teambrain-http.*.log
 .venv/
 .venv-*/
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*-wal
+*-shm

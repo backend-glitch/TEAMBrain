@@ -22,6 +22,8 @@ def test_create_tables_creates_contracts_and_messages():
             "work_log",
             "members",
             "roles",
+            "dashboard_users",
+            "dashboard_settings",
         }.issubset(tables)
 
         contract_columns = {
@@ -69,6 +71,14 @@ def test_create_tables_creates_contracts_and_messages():
         }
         assert member_defaults["run_mode"] == "'manual'"
         assert member_defaults["tool_label"] == "''"
+        dashboard_user_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(dashboard_users)")
+        }
+        assert dashboard_user_columns == {
+            "username", "password_hash", "role_scope", "linked_role",
+            "created_at", "disabled",
+        }
         role_rows = connection.execute(
             "SELECT name, active, token_env_var, can_write_contract FROM roles ORDER BY rowid"
         ).fetchall()

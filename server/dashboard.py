@@ -18,10 +18,14 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from server import messages
+from server.deployment import dashboard_poll_ms, production_mode
+from server.http_security import request_is_https
 from server.database import create_tables
 from server.members import dashboard_members, set_dashboard_member, set_profile
 from server.roles import create_role, list_roles, set_role_active, validate_role
 from server.dashboard_ui import DASHBOARD_HTML as _REDESIGNED_DASHBOARD_HTML
+from server import dashboard_users
+from server.storage import connect, postgres_enabled
 
 
 SESSION_COOKIE = "teambrain_session"
@@ -99,13 +103,13 @@ DASHBOARD_HTML = _REDESIGNED_DASHBOARD_HTML
 
 
 def _readonly_connection(database_path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True)
+    return connect(database_path, readonly=True)
 
 
 def dashboard_payload() -> dict[str, Any]:
     """Return current contract version, proposal threads, and escalated proposals."""
     database_path = Path(messages.DB_PATH)
-    if not database_path.exists():
+    if not postgres_enabled() and not database_path.exists():
         with sqlite3.connect(":memory:") as connection:
             create_tables(connection)
             return {
@@ -118,7 +122,7 @@ def dashboard_payload() -> dict[str, Any]:
             }
 
     # Apply additive schema migrations before opening the dashboard's read-only view.
-    with sqlite3.connect(database_path) as connection:
+    with connect(database_path) as connection:
         create_tables(connection)
 
     with closing(_readonly_connection(database_path)) as connection:
@@ -126,34 +130,22 @@ def dashboard_payload() -> dict[str, Any]:
         contract_version = connection.execute(
             "SELECT COALESCE(MAX(version), 0) FROM contracts"
         ).fetchone()[0]
-        proposal_rows = connection.execute(
-            """
-            SELECT id, from_role, to_role, type, body, contract_version,
-                   proposal_id, status, decision_note, handoff_prompt, created_at
-            FROM messages
-            WHERE type = 'proposal'
-            ORDER BY created_at, id
-            """
-        ).fetchall()
-        message_rows = connection.execute(
-            """
-            SELECT id, from_role, to_role, type, body, contract_version,
-                   proposal_id, status, decision_note, handoff_prompt, "read", created_at
-            FROM messages
-            WHERE proposal_id IS NOT NULL
-            ORDER BY created_at, id
-            """
-        ).fetchall()
-        recent_message_rows = connection.execute(
-            """
-            SELECT id, from_role, to_role, type, body, contract_version,
-                   handoff_prompt, created_at
-            FROM messages
-            ORDER BY created_at DESC, id DESC
-            """
-        ).fetchall()
-        member_rows = dashboard_members(connection)
         role_rows = list_roles(connection)
+        all_message_rows = connection.execute(
+            '''SELECT id, from_role, to_role, type, body, contract_version,
+                      proposal_id, status, decision_note, handoff_prompt, "read", created_at
+               FROM messages ORDER BY created_at, id'''
+        ).fetchall()
+        proposal_rows = [row for row in all_message_rows if row["type"] == "proposal"]
+        message_rows = [row for row in all_message_rows if row["proposal_id"] is not None]
+        recent_message_rows = sorted(
+            all_message_rows,
+            key=lambda row: (row["created_at"], row["id"]),
+            reverse=True,
+        )
+        member_rows = dashboard_members(
+            connection, role_rows=role_rows, messages=all_message_rows
+        )
 
     for role in role_rows:
         role["token_configured"] = bool(os.environ.get(role["token_env_var"]))
@@ -166,7 +158,13 @@ def dashboard_payload() -> dict[str, Any]:
 
     proposals = []
     for proposal in proposal_rows:
-        data = dict(proposal)
+        data = {
+            key: proposal[key]
+            for key in (
+                "id", "from_role", "to_role", "type", "body", "contract_version",
+                "proposal_id", "status", "decision_note", "handoff_prompt", "created_at",
+            )
+        }
         data["thread"] = messages._messages_with_contract_warnings(
             thread_rows.get(proposal["id"], []), contract_version
         )
@@ -179,38 +177,105 @@ def dashboard_payload() -> dict[str, Any]:
         "escalated_proposals": [
             proposal for proposal in proposals if proposal["status"] == "escalated"
         ],
-        "recent_messages": [dict(row) for row in recent_message_rows],
+        "recent_messages": [
+            {
+                key: row[key]
+                for key in (
+                    "id", "from_role", "to_role", "type", "body",
+                    "contract_version", "handoff_prompt", "created_at",
+                )
+            }
+            for row in recent_message_rows
+        ],
         "members": member_rows,
     }
 
 
 async def dashboard_page(request: Request):
     """Serve the dashboard shell; client data access is session authenticated."""
-    return HTMLResponse(DASHBOARD_HTML)
+    page = DASHBOARD_HTML.replace(
+        "__TEAMBRAIN_DASHBOARD_POLL_MS__", str(dashboard_poll_ms())
+    )
+    return HTMLResponse(page)
 
 
-def _session_signature(expires: str) -> str | None:
+def _session_signature(payload: str) -> str | None:
     secret = os.environ.get("TEAMBRAIN_SESSION_SECRET")
     if not secret:
         return None
-    return hmac.new(secret.encode("utf-8"), expires.encode("ascii"), hashlib.sha256).hexdigest()
+    return hmac.new(secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def _issue_session(identity: dict[str, Any]) -> str | None:
+    secret = os.environ.get("TEAMBRAIN_SESSION_SECRET")
+    if not secret:
+        return None
+    claims = {**identity, "expires": int(time.time()) + SESSION_SECONDS}
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(claims, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = _session_signature(encoded)
+    return f"{encoded}.{signature}" if signature else None
+
+
+def _session_identity(request: Request) -> dict[str, Any] | None:
+    cookie = request.cookies.get(SESSION_COOKIE, "")
+    payload, dot, signature = cookie.partition(".")
+    if not dot:
+        return None
+    expected = _session_signature(payload)
+    if expected is None or not hmac.compare_digest(signature, expected):
+        return None
+    try:
+        padding = "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload + padding))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(claims, dict) or claims.get("expires", 0) <= int(time.time()):
+        return None
+    if claims.get("kind") == "fallback":
+        if (
+            not dashboard_users.fallback_owner_enabled()
+            or not os.environ.get("TEAMBRAIN_DASHBOARD_TOKEN")
+        ):
+            return None
+        return {
+            "username": "owner",
+            "role_scope": "owner",
+            "linked_role": None,
+            "legacy_fallback": True,
+        }
+    if claims.get("kind") != "user" or not isinstance(claims.get("username"), str):
+        return None
+    user = dashboard_users.user_for_session(claims["username"])
+    if user is None:
+        return None
+    return {**user, "legacy_fallback": False}
 
 
 def _valid_session(request: Request) -> bool:
-    cookie = request.cookies.get(SESSION_COOKIE, "")
-    expires, dot, signature = cookie.partition(".")
-    if not dot or not expires.isascii() or not expires.isdigit():
-        return False
-    expected = _session_signature(expires)
-    if expected is None or not hmac.compare_digest(signature, expected):
-        return False
-    return int(expires) > int(time.time())
+    return _session_identity(request) is not None
+
+
+def _owner_identity(request: Request) -> dict[str, Any] | None:
+    identity = _session_identity(request)
+    return identity if identity and identity["role_scope"] == "owner" else None
+
+
+def _json_session_error(request: Request, *, owner_only: bool = False):
+    identity = _session_identity(request)
+    if identity is None:
+        return None, JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if owner_only and identity["role_scope"] != "owner":
+        return identity, JSONResponse({"error": "Owner access required."}, status_code=403)
+    return identity, None
 
 
 def _valid_origin(request: Request) -> bool:
     origin = request.headers.get("origin", "")
     parsed = urlsplit(origin)
-    expected = f"{request.url.scheme}://{request.url.netloc}"
+    scheme = "https" if request_is_https(request) else "http"
+    expected = f"{scheme}://{request.url.netloc}"
     return bool(parsed.scheme and parsed.netloc and not parsed.path and origin == expected)
 
 
@@ -225,7 +290,7 @@ def _login_limited(ip: str, *, failed: bool = False) -> bool:
 
 
 async def dashboard_login(request: Request):
-    """Validate the dashboard password and issue a signed session cookie."""
+    """Authenticate an account or the configured legacy owner fallback."""
     if not _valid_origin(request):
         return JSONResponse({"error": "Request rejected."}, status_code=403)
     ip = request.client.host if request.client else "unknown"
@@ -235,29 +300,44 @@ async def dashboard_login(request: Request):
         payload = await request.json()
     except (ValueError, json.JSONDecodeError):
         payload = {}
+    username = payload.get("username", "") if isinstance(payload, dict) else ""
     supplied = payload.get("password", "") if isinstance(payload, dict) else ""
+    if not isinstance(username, str):
+        username = ""
     if not isinstance(supplied, str):
         supplied = ""
-    expected_password = os.environ.get("TEAMBRAIN_DASHBOARD_TOKEN", "")
-    password_matches = hmac.compare_digest(
-        supplied.encode("utf-8"), expected_password.encode("utf-8")
-    )
-    if not expected_password or not password_matches:
+    identity = dashboard_users.authenticate_user(username, supplied) if username else None
+    if identity is not None:
+        identity["kind"] = "user"
+    else:
+        expected_password = os.environ.get("TEAMBRAIN_DASHBOARD_TOKEN", "")
+        is_fallback_name = username.strip().lower() in {"", "owner"}
+        password_matches = hmac.compare_digest(
+            supplied.encode("utf-8"), expected_password.encode("utf-8")
+        )
+        if (
+            not is_fallback_name
+            or not dashboard_users.fallback_owner_enabled()
+            or not expected_password
+            or not password_matches
+        ):
+            _login_limited(ip, failed=True)
+            return JSONResponse({"error": "Wrong username or password."}, status_code=401)
+        identity = {"kind": "fallback", "username": "owner"}
+
+    session_value = _issue_session(identity)
+    if session_value is None:
         _login_limited(ip, failed=True)
-        return JSONResponse({"error": "Wrong password."}, status_code=401)
-    expires = str(int(time.time()) + SESSION_SECONDS)
-    signature = _session_signature(expires)
-    if signature is None:
         return JSONResponse({"error": "Sign-in unavailable."}, status_code=503)
     response = JSONResponse({"ok": True})
     response.set_cookie(
         SESSION_COOKIE,
-        f"{expires}.{signature}",
+        session_value,
         max_age=SESSION_SECONDS,
         expires=datetime.now(timezone.utc) + timedelta(seconds=SESSION_SECONDS),
         httponly=True,
         samesite="strict",
-        secure=request.url.scheme == "https",
+        secure=production_mode() or request_is_https(request),
         path="/",
     )
     with _LOGIN_FAILURES_LOCK:
@@ -275,24 +355,47 @@ async def dashboard_logout(request: Request):
         path="/",
         httponly=True,
         samesite="strict",
-        secure=request.url.scheme == "https",
+        secure=production_mode() or request_is_https(request),
     )
     return response
 
 
 async def dashboard_api(request: Request):
     """Serve read-only dashboard data as JSON."""
-    if not _valid_session(request):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    return JSONResponse(dashboard_payload())
+    identity, error = _json_session_error(request)
+    if error:
+        return error
+    payload = dashboard_payload()
+    if identity["role_scope"] == "member":
+        linked_role = identity["linked_role"]
+        payload["members"] = [
+            {
+                key: value
+                for key, value in member.items()
+                if key not in {"last_ip", "machine_label"}
+            }
+            for member in payload.get("members", [])
+            if member.get("role") == linked_role
+        ]
+    payload["viewer"] = {
+        "username": identity["username"],
+        "role_scope": identity["role_scope"],
+        "linked_role": identity["linked_role"],
+        "legacy_fallback": identity["legacy_fallback"],
+    }
+    if identity["role_scope"] == "owner":
+        payload["dashboard_users"] = dashboard_users.list_users()
+        payload["fallback_owner_enabled"] = dashboard_users.fallback_owner_enabled()
+    return JSONResponse(payload)
 
 
 async def dashboard_update_member(request: Request):
-    """Update a team profile from the dashboard owner's same-origin session."""
+    """Update an owner's profile or the signed-in member's own linked role."""
     if not _valid_origin(request):
         return JSONResponse({"error": "Request rejected."}, status_code=403)
-    if not _valid_session(request):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    identity, error = _json_session_error(request)
+    if error:
+        return error
     try:
         payload = await request.json()
     except (ValueError, json.JSONDecodeError):
@@ -300,6 +403,8 @@ async def dashboard_update_member(request: Request):
     if not isinstance(payload, dict):
         return JSONResponse({"error": "Invalid profile."}, status_code=400)
     role = request.path_params.get("role", "")
+    if identity["role_scope"] != "owner" and identity["linked_role"] != role:
+        return JSONResponse({"error": "You may only edit your linked role."}, status_code=403)
     try:
         profile_values = (
             role,
@@ -321,11 +426,12 @@ async def dashboard_update_member(request: Request):
 
 
 async def dashboard_send_task(request: Request):
-    """Create an owner-authored proposal in the selected role's inbox."""
+    """Create an owner task or limit a member to their linked role."""
     if not _valid_origin(request):
         return JSONResponse({"error": "Request rejected."}, status_code=403)
-    if not _valid_session(request):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    identity, error = _json_session_error(request)
+    if error:
+        return error
     try:
         payload = await request.json()
     except (ValueError, json.JSONDecodeError):
@@ -336,8 +442,10 @@ async def dashboard_send_task(request: Request):
     if len(task) > 10000:
         return JSONResponse({"error": "Task must be at most 10000 characters."}, status_code=400)
     role = request.path_params.get("role", "")
+    if identity["role_scope"] != "owner" and identity["linked_role"] != role:
+        return JSONResponse({"error": "You may only send tasks to your linked role."}, status_code=403)
     try:
-        with sqlite3.connect(messages.DB_PATH) as connection:
+        with connect() as connection:
             create_tables(connection)
             validate_role(connection, role)
     except ValueError:
@@ -358,8 +466,9 @@ async def dashboard_create_role(request: Request):
     """Add a role from the owner-only dashboard session."""
     if not _valid_origin(request):
         return JSONResponse({"error": "Request rejected."}, status_code=403)
-    if not _valid_session(request):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    _, error = _json_session_error(request, owner_only=True)
+    if error:
+        return error
     try:
         payload = await request.json()
     except (ValueError, json.JSONDecodeError):
@@ -382,8 +491,9 @@ async def dashboard_set_role_active(request: Request):
     """Enable or disable a role from the owner-only dashboard session."""
     if not _valid_origin(request):
         return JSONResponse({"error": "Request rejected."}, status_code=403)
-    if not _valid_session(request):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    _, error = _json_session_error(request, owner_only=True)
+    if error:
+        return error
     try:
         payload = await request.json()
     except (ValueError, json.JSONDecodeError):
@@ -401,8 +511,9 @@ async def dashboard_human_decision(request: Request):
     """Resolve an escalated proposal using the owner's dashboard session."""
     if not _valid_origin(request):
         return JSONResponse({"error": "Request rejected."}, status_code=403)
-    if not _valid_session(request):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    _, error = _json_session_error(request, owner_only=True)
+    if error:
+        return error
     try:
         payload = await request.json()
     except (ValueError, json.JSONDecodeError):
@@ -419,3 +530,99 @@ async def dashboard_human_decision(request: Request):
         request.path_params.get("proposal_id", ""), decision, note
     )
     return JSONResponse(result, status_code=400 if result.get("error") else 200)
+
+
+async def dashboard_users_api(request: Request):
+    """List account metadata without returning password hashes."""
+    _, error = _json_session_error(request, owner_only=True)
+    if error:
+        return error
+    return JSONResponse({
+        "users": dashboard_users.list_users(),
+        "fallback_owner_enabled": dashboard_users.fallback_owner_enabled(),
+    })
+
+
+async def dashboard_create_user(request: Request):
+    if not _valid_origin(request):
+        return JSONResponse({"error": "Request rejected."}, status_code=403)
+    _, error = _json_session_error(request, owner_only=True)
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        payload = None
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "Invalid user."}, status_code=400)
+    try:
+        user = dashboard_users.create_user(
+            payload.get("username"),
+            payload.get("password"),
+            payload.get("role_scope"),
+            payload.get("linked_role"),
+        )
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    return JSONResponse(user, status_code=201)
+
+
+async def dashboard_set_user_disabled(request: Request):
+    if not _valid_origin(request):
+        return JSONResponse({"error": "Request rejected."}, status_code=403)
+    _, error = _json_session_error(request, owner_only=True)
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        payload = None
+    if not isinstance(payload, dict) or not isinstance(payload.get("disabled"), bool):
+        return JSONResponse({"error": "disabled must be a boolean."}, status_code=400)
+    try:
+        dashboard_users.set_user_disabled(
+            request.path_params.get("username", ""), payload["disabled"]
+        )
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    return JSONResponse({"ok": True})
+
+
+async def dashboard_reset_user_password(request: Request):
+    if not _valid_origin(request):
+        return JSONResponse({"error": "Request rejected."}, status_code=403)
+    _, error = _json_session_error(request, owner_only=True)
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        payload = None
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "Invalid password reset."}, status_code=400)
+    try:
+        dashboard_users.reset_password(
+            request.path_params.get("username", ""), payload.get("password")
+        )
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    return JSONResponse({"ok": True})
+
+
+async def dashboard_set_fallback_login(request: Request):
+    if not _valid_origin(request):
+        return JSONResponse({"error": "Request rejected."}, status_code=403)
+    _, error = _json_session_error(request, owner_only=True)
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        payload = None
+    if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):
+        return JSONResponse({"error": "enabled must be a boolean."}, status_code=400)
+    try:
+        dashboard_users.set_fallback_owner_enabled(payload["enabled"])
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    return JSONResponse({"fallback_owner_enabled": payload["enabled"]})

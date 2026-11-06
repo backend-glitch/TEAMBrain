@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: teambrain
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: TEAMBRAIN_ENV
+        value: production
+      - key: TEAMBRAIN_REQUIRE_DATABASE_URL
+        value: "true"
+      - key: TEAMBRAIN_DASHBOARD_POLL_MS
+        value: "30000"
+      - key: HOST
+        value: 0.0.0.0
+      - key: TEAMBRAIN_DASHBOARD_PUBLIC
+        value: "true"
+      - key: TEAMBRAIN_ALLOWED_HOSTS
+        fromService:
+          type: web
+          name: teambrain
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: DATABASE_URL
+        sync: false
+      - key: TEAMBRAIN_SESSION_SECRET
+        generateValue: true
+      - key: TEAMBRAIN_DASHBOARD_TOKEN
+        generateValue: true
+      - key: TEAMBRAIN_TOKEN_UIUX
+        generateValue: true
+      - key: TEAMBRAIN_TOKEN_FRONTEND
+        generateValue: true
+      - key: TEAMBRAIN_TOKEN_BACKEND
+        generateValue: true

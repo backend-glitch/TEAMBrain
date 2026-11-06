@@ -5,6 +5,7 @@ from starlette.testclient import TestClient
 
 from server import app as app_module
 from server import dashboard
+from server import dashboard_users
 from server import messages
 
 
@@ -19,6 +20,7 @@ def dashboard_client(monkeypatch, tmp_path):
     monkeypatch.setenv("TEAMBRAIN_TOKEN_UIUX", "uiux-role-token")
     monkeypatch.setenv("TEAMBRAIN_DASHBOARD_TOKEN", "dashboard-only-password")
     monkeypatch.setenv("TEAMBRAIN_SESSION_SECRET", "test-session-signing-secret")
+    monkeypatch.setenv("TEAMBRAIN_DASHBOARD_PUBLIC", "false")
     dashboard._LOGIN_FAILURES.clear()
 
     proposal_id = "sample-proposal"
@@ -43,6 +45,7 @@ def dashboard_client(monkeypatch, tmp_path):
             "thread": thread,
         }],
         "escalated_proposals": [],
+        "recent_messages": [{"id": "sample-message", "body": "Recent activity"}],
         "members": [
             {
                 "role": role,
@@ -73,9 +76,9 @@ def dashboard_client(monkeypatch, tmp_path):
         yield client, proposal_id, app
 
 
-def login(client, password="dashboard-only-password"):
+def login(client, password="dashboard-only-password", username="owner"):
     return client.post(
-        "/api/login", json={"password": password}, headers={"Origin": ORIGIN}
+        "/api/login", json={"username": username, "password": password}, headers={"Origin": ORIGIN}
     )
 
 
@@ -95,7 +98,7 @@ def test_wrong_password_fails_with_friendly_error(dashboard_client):
     response = login(client, "not-the-password")
 
     assert response.status_code == 401
-    assert response.json() == {"error": "Wrong password."}
+    assert response.json() == {"error": "Wrong username or password."}
     assert "set-cookie" not in response.headers
 
 
@@ -126,6 +129,96 @@ def test_https_login_sets_secure_cookie(dashboard_client):
 
     assert response.status_code == 200
     assert "Secure" in response.headers["set-cookie"]
+
+
+@pytest.mark.parametrize(
+    "missing_variable",
+    ["TEAMBRAIN_SESSION_SECRET", "TEAMBRAIN_DASHBOARD_TOKEN"],
+)
+def test_production_startup_requires_session_and_dashboard_secrets(
+    monkeypatch, tmp_path, missing_variable
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "production.sqlite3")
+    monkeypatch.setenv("TEAMBRAIN_ENV", "production")
+    monkeypatch.setenv("TEAMBRAIN_SESSION_SECRET", "configured")
+    monkeypatch.setenv("TEAMBRAIN_DASHBOARD_TOKEN", "configured")
+    monkeypatch.delenv(missing_variable, raising=False)
+
+    with pytest.raises(RuntimeError, match=missing_variable):
+        app_module.create_http_app()
+
+
+def test_healthz_is_unauthenticated_and_does_not_read_dashboard_data(
+    dashboard_client, monkeypatch
+):
+    client, _, _ = dashboard_client
+    monkeypatch.setattr(
+        dashboard, "dashboard_payload", lambda: pytest.fail("healthz read dashboard data")
+    )
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_public_dashboard_setting_allows_forwarded_requests_but_keeps_session_and_origin(
+    dashboard_client, monkeypatch
+):
+    client, _, _ = dashboard_client
+    remote_headers = {"Cf-Connecting-Ip": "198.51.100.20"}
+    assert client.get("/dashboard", headers=remote_headers).status_code == 403
+    xff_headers = {"X-Forwarded-For": "198.51.100.20"}
+    assert client.get("/dashboard", headers=xff_headers).status_code == 403
+
+    monkeypatch.setenv("TEAMBRAIN_DASHBOARD_PUBLIC", "true")
+    assert client.get("/dashboard", headers=remote_headers).status_code == 200
+    assert client.get("/dashboard", headers=xff_headers).status_code == 200
+    assert client.get("/api/dashboard", headers=remote_headers).status_code == 401
+
+    signed_in = client.post(
+        "/api/login",
+        json={"password": "dashboard-only-password"},
+        headers={**remote_headers, "Origin": ORIGIN},
+    )
+    assert signed_in.status_code == 200
+    assert client.get("/api/dashboard", headers=remote_headers).status_code == 200
+
+    forbidden_action = client.post(
+        "/api/tasks/frontend",
+        json={"task": "must keep origin check"},
+        headers={**remote_headers, "Origin": "https://attacker.example"},
+    )
+    assert forbidden_action.status_code == 403
+
+
+def test_production_honors_forwarded_https_and_sets_secure_cookie_and_headers(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "production-http.sqlite3")
+    monkeypatch.setenv("TEAMBRAIN_ENV", "production")
+    monkeypatch.setenv("TEAMBRAIN_SESSION_SECRET", "test-session-signing-secret")
+    monkeypatch.setenv("TEAMBRAIN_DASHBOARD_TOKEN", "dashboard-only-password")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_FRONTEND", "frontend-role-token")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_BACKEND", "backend-role-token")
+    monkeypatch.setenv("TEAMBRAIN_TOKEN_UIUX", "uiux-role-token")
+    app = app_module.create_http_app()
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        response = client.post(
+            "/api/login",
+            json={"password": "dashboard-only-password"},
+            headers={"Origin": "https://127.0.0.1:8000", "X-Forwarded-Proto": "https"},
+        )
+
+    assert response.status_code == 200
+    assert "Secure" in response.headers["set-cookie"]
+    assert response.headers["strict-transport-security"].startswith("max-age=")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'none'" in csp
+    assert "script-src 'self' 'sha256-" in csp
 
 
 def test_session_cookie_survives_simulated_reload(dashboard_client):
@@ -536,3 +629,173 @@ def test_dashboard_human_decision_requires_session_csrf_and_resolves_escalated(
     assert response.json()["status"] == "rejected"
     assert response.json()["note"] == payload["note"]
     assert messages.get_thread(proposal["proposal_id"])[0]["status"] == "rejected"
+
+
+def test_member_dashboard_is_scoped_to_linked_role_and_redacts_private_metadata(
+    dashboard_client
+):
+    client, _, _ = dashboard_client
+    dashboard_users.create_user(
+        "frontend-user", "a long member password", "member", "frontend"
+    )
+
+    response = client.post(
+        "/api/login",
+        json={"username": "frontend-user", "password": "a long member password"},
+        headers={"Origin": ORIGIN},
+    )
+    assert response.status_code == 200
+    payload = client.get("/api/dashboard").json()
+
+    assert payload["viewer"]["role_scope"] == "member"
+    assert payload["viewer"]["linked_role"] == "frontend"
+    assert len(payload["members"]) == 1
+    assert payload["members"][0]["role"] == "frontend"
+    assert "last_ip" not in payload["members"][0]
+    assert "machine_label" not in payload["members"][0]
+    assert payload["proposals"]
+    assert "recent_messages" in payload
+    assert "dashboard_users" not in payload
+
+
+def test_owner_dashboard_retains_all_role_metadata(dashboard_client):
+    client, _, _ = dashboard_client
+    assert login(client).status_code == 200
+    payload = client.get("/api/dashboard").json()
+
+    assert payload["viewer"]["role_scope"] == "owner"
+    assert {member["role"] for member in payload["members"]} == {
+        "uiux", "frontend", "backend"
+    }
+    assert all("last_ip" in member and "machine_label" in member for member in payload["members"])
+    assert payload["fallback_owner_enabled"] is True
+
+
+def test_member_is_denied_every_owner_only_action_and_other_role_changes(
+    dashboard_client
+):
+    client, proposal_id, _ = dashboard_client
+    dashboard_users.create_user(
+        "frontend-user", "a long member password", "member", "frontend"
+    )
+    assert client.post(
+        "/api/login",
+        json={"username": "frontend-user", "password": "a long member password"},
+        headers={"Origin": ORIGIN},
+    ).status_code == 200
+    origin = {"Origin": ORIGIN}
+
+    assert client.get("/api/users").status_code == 403
+    assert client.post("/api/users", json={}, headers=origin).status_code == 403
+    assert client.post(
+        "/api/users/fallback", json={"enabled": False}, headers=origin
+    ).status_code == 403
+    assert client.post(
+        "/api/roles", json={"name": "newrole", "color": "#112233"}, headers=origin
+    ).status_code == 403
+    assert client.post(
+        "/api/roles/backend/active", json={"active": False}, headers=origin
+    ).status_code == 403
+    assert client.post(
+        f"/api/proposals/{proposal_id}/decision",
+        json={"decision": "reject"},
+        headers=origin,
+    ).status_code == 403
+    assert client.post(
+        "/api/tasks/backend", json={"task": "other role"}, headers=origin
+    ).status_code == 403
+    assert client.post(
+        "/api/members/backend",
+        json={"ai_name": "Changed", "person_name": "", "machine_label": ""},
+        headers=origin,
+    ).status_code == 403
+
+    own_task = client.post(
+        "/api/tasks/frontend", json={"task": "my role task"}, headers=origin
+    )
+    assert own_task.status_code == 201
+    own_profile = client.post(
+        "/api/members/frontend",
+        json={"ai_name": "Front AI", "person_name": "", "machine_label": ""},
+        headers=origin,
+    )
+    assert own_profile.status_code == 200
+
+
+def test_owner_can_create_disable_reset_users_and_disable_fallback(dashboard_client):
+    client, _, _ = dashboard_client
+    assert login(client).status_code == 200
+    fallback_cookie = client.cookies.get(dashboard.SESSION_COOKIE)
+
+    assert client.post(
+        "/api/users",
+        json={"username": "missing-csrf", "password": "long enough password", "role_scope": "owner"},
+    ).status_code == 403
+    created_owner = client.post(
+        "/api/users",
+        json={
+            "username": "backup-owner",
+            "password": "a secure owner password",
+            "role_scope": "owner",
+            "linked_role": None,
+        },
+        headers={"Origin": ORIGIN},
+    )
+    assert created_owner.status_code == 201
+    assert "password" not in created_owner.json()
+    assert "password_hash" not in created_owner.json()
+    assert "password_hash" not in client.get("/api/users").text
+
+    created_member = client.post(
+        "/api/users",
+        json={
+            "username": "front-user",
+            "password": "a secure member password",
+            "role_scope": "member",
+            "linked_role": "frontend",
+        },
+        headers={"Origin": ORIGIN},
+    )
+    assert created_member.status_code == 201
+
+    reset = client.post(
+        "/api/users/front-user/password",
+        json={"password": "a changed member password"},
+        headers={"Origin": ORIGIN},
+    )
+    assert reset.status_code == 200
+    assert "password" not in reset.text
+    assert dashboard_users.authenticate_user("front-user", "a secure member password") is None
+    assert dashboard_users.authenticate_user("front-user", "a changed member password") is not None
+
+    client.cookies.clear()
+    assert login(client, "a changed member password", "front-user").status_code == 200
+    member_cookie = client.cookies.get(dashboard.SESSION_COOKIE)
+    client.cookies.clear()
+    client.cookies.set(dashboard.SESSION_COOKIE, fallback_cookie)
+
+    disabled = client.post(
+        "/api/users/front-user/disabled",
+        json={"disabled": True},
+        headers={"Origin": ORIGIN},
+    )
+    assert disabled.status_code == 200
+    assert dashboard_users.authenticate_user("front-user", "a changed member password") is None
+    assert client.get("/api/users").json()["users"][-1]["disabled"] is True
+
+    client.cookies.clear()
+    client.cookies.set(dashboard.SESSION_COOKIE, member_cookie)
+    assert client.get("/api/dashboard").status_code == 401
+    client.cookies.clear()
+    client.cookies.set(dashboard.SESSION_COOKIE, fallback_cookie)
+
+    fallback = client.post(
+        "/api/users/fallback",
+        json={"enabled": False},
+        headers={"Origin": ORIGIN},
+    )
+    assert fallback.status_code == 200
+    assert client.get("/api/dashboard").status_code == 401
+
+    assert login(client).status_code == 401
+    assert login(client, "a secure owner password", "backup-owner").status_code == 200

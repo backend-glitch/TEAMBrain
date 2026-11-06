@@ -3,10 +3,11 @@
 import hmac
 import json
 import os
-import sqlite3
 from contextvars import ContextVar
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
+from server.deployment import dashboard_public
+from server.storage import connect
 
 
 current_role: ContextVar[str | None] = ContextVar("teambrain_current_role", default=None)
@@ -44,9 +45,7 @@ def _mcp_request_metadata(body: bytes) -> tuple[str | None, str | None, str | No
 def configured_tokens() -> dict[str, str]:
     """Load tokens for active database roles, omitting unset values."""
     from server.database import create_tables
-    from server.messages import DB_PATH
-
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         create_tables(connection)
         role_environment = connection.execute(
             "SELECT name, token_env_var FROM roles WHERE active = 1 ORDER BY rowid"
@@ -68,6 +67,7 @@ class BearerRoleMiddleware:
         "/api/logout",
         "/api/roles",
         "/api/proposals",
+        "/api/users",
     }
 
     def __init__(
@@ -92,13 +92,20 @@ class BearerRoleMiddleware:
         if path == "/dashboard" or is_dashboard_api:
             forwarded_headers = {key.lower() for key, _ in scope["headers"]}
             if (
-                b"cf-connecting-ip" in forwarded_headers
-                or b"x-forwarded-for" in forwarded_headers
+                not dashboard_public()
+                and (
+                    b"cf-connecting-ip" in forwarded_headers
+                    or b"x-forwarded-for" in forwarded_headers
+                )
             ):
                 await PlainTextResponse("Forbidden", status_code=403)(
                     scope, receive, send
                 )
                 return
+
+        if path == "/healthz":
+            await self.app(scope, receive, send)
+            return
 
         if (
             path in self.DASHBOARD_PATHS
@@ -106,6 +113,7 @@ class BearerRoleMiddleware:
             or path.startswith("/api/tasks/")
             or path.startswith("/api/roles/")
             or path.startswith("/api/proposals/")
+            or path.startswith("/api/users/")
         ):
             await self.app(scope, receive, send)
             return

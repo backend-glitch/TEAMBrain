@@ -2,7 +2,6 @@
 
 import argparse
 import os
-import sqlite3
 from typing import Literal
 
 try:
@@ -38,7 +37,21 @@ from server.dashboard import (
     dashboard_set_role_active,
     dashboard_human_decision,
     dashboard_update_member,
+    dashboard_users_api,
+    dashboard_create_user,
+    dashboard_set_user_disabled,
+    dashboard_reset_user_password,
+    dashboard_set_fallback_login,
 )
+from server.deployment import (
+    production_mode,
+    server_host,
+    server_port,
+    validate_startup_config,
+)
+from server.http_security import ProductionSecurityMiddleware
+from starlette.responses import JSONResponse
+from server.storage import connect, postgres_enabled
 
 mcp = MCPServer("TeamBrain")
 
@@ -176,8 +189,10 @@ mcp.tool()(write_contract)
 
 def create_http_app():
     """Build the authenticated Streamable HTTP app and protected dashboard routes."""
+    validate_startup_config()
+    initialize_storage()
     app = mcp.streamable_http_app(
-        host="127.0.0.1",
+        host=server_host(),
         streamable_http_path="/mcp",
         transport_security=transport_security_settings(),
     )
@@ -194,6 +209,20 @@ def create_http_app():
     )
     app.add_route("/api/login", dashboard_login, methods=["POST"])
     app.add_route("/api/logout", dashboard_logout, methods=["POST"])
+    app.add_route("/api/users", dashboard_users_api, methods=["GET"])
+    app.add_route("/api/users", dashboard_create_user, methods=["POST"])
+    app.add_route(
+        "/api/users/{username}/disabled", dashboard_set_user_disabled, methods=["POST"]
+    )
+    app.add_route(
+        "/api/users/{username}/password", dashboard_reset_user_password, methods=["POST"]
+    )
+    app.add_route("/api/users/fallback", dashboard_set_fallback_login, methods=["POST"])
+    app.add_route(
+        "/healthz",
+        lambda request: JSONResponse({"status": "ok"}),
+        methods=["GET"],
+    )
     dashboard_token = os.environ.get("TEAMBRAIN_DASHBOARD_TOKEN")
     initial_tokens = configured_tokens()
     if dashboard_token and dashboard_token in initial_tokens.values():
@@ -203,14 +232,20 @@ def create_http_app():
         tokens=None,
         dashboard_token=dashboard_token,
     )
+    app.add_middleware(
+        ProductionSecurityMiddleware,
+        production=production_mode(),
+    )
     return app
 
 
 def initialize_storage() -> None:
-    """Apply schema migrations before starting the stdio transport."""
+    """Initialize the configured database before starting a transport."""
     from server.messages import DB_PATH
 
-    with sqlite3.connect(DB_PATH) as connection:
+    if not postgres_enabled():
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with connect() as connection:
         create_tables(connection)
 
 
@@ -229,10 +264,11 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    validate_startup_config()
     if args.http:
         import uvicorn
 
-        uvicorn.run(create_http_app(), host="127.0.0.1", port=8000)
+        uvicorn.run(create_http_app(), host=server_host(), port=server_port())
     else:
         initialize_storage()
         mcp.run(transport="stdio")
