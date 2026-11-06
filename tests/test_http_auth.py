@@ -1,11 +1,14 @@
-import asyncio
+import json
+import sqlite3
 
 from server import app as app_module
 from server.http_auth import BearerRoleMiddleware, configured_tokens, current_role
+from server import messages
 
 
 def invoke_middleware(
-    middleware, authorization=None, path="/mcp", forwarded_headers=None
+    middleware, authorization=None, path="/mcp", forwarded_headers=None,
+    body: bytes = b"", client=("127.0.0.1", 12345),
 ):
     headers = []
     if authorization is not None:
@@ -22,18 +25,30 @@ def invoke_middleware(
         "raw_path": path.encode("ascii"),
         "query_string": b"",
         "headers": headers,
-        "client": ("127.0.0.1", 12345),
+        "client": client,
         "server": ("127.0.0.1", 8000),
     }
     events = []
 
+    delivered = False
+
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
 
     async def send(message):
         events.append(message)
 
-    asyncio.run(middleware(scope, receive, send))
+    coroutine = middleware(scope, receive, send)
+    try:
+        coroutine.send(None)
+    except StopIteration:
+        pass
+    else:
+        raise AssertionError("test middleware unexpectedly suspended")
     return events
 
 
@@ -106,6 +121,96 @@ def test_bearer_middleware_sets_role_for_valid_token():
     assert events[0]["status"] == 200
     assert seen_roles == ["backend"]
     assert current_role.get() is None
+
+
+def test_authenticated_mcp_request_updates_member_and_extracts_client_info(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "members.sqlite3")
+    initialize_body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "Cursor", "version": "2.1"}},
+        }
+    ).encode()
+    tool_call_body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "post_message", "arguments": {"body": "secret body"}},
+        }
+    ).encode()
+    seen = []
+
+    async def app(scope, receive, send):
+        seen.append(await receive())
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = BearerRoleMiddleware(app, {"frontend": "frontend-secret"})
+    initialize_events = invoke_middleware(
+        middleware,
+        authorization="Bearer frontend-secret",
+        body=initialize_body,
+        client=("127.0.0.8", 12345),
+    )
+    events = invoke_middleware(
+        middleware,
+        authorization="Bearer frontend-secret",
+        body=tool_call_body,
+        forwarded_headers={"X-Forwarded-For": "198.51.100.1, 10.0.0.2"},
+        client=("127.0.0.8", 12345),
+    )
+
+    assert initialize_events[0]["status"] == 200
+    assert events[0]["status"] == 200
+    assert [event["body"] for event in seen] == [initialize_body, tool_call_body]
+    with sqlite3.connect(messages.DB_PATH) as connection:
+        row = connection.execute(
+            "SELECT role, client_name, client_version, last_ip, last_seen, first_seen, "
+            "last_tool, request_count "
+            "FROM members WHERE role = 'frontend'"
+        ).fetchone()
+        columns = {item[1] for item in connection.execute("PRAGMA table_info(members)")}
+    assert row[0] == "frontend"
+    assert row[1:3] == ("Cursor", "2.1")
+    assert row[3] == "198.51.100.1"
+    assert row[4] and row[5]
+    assert row[4] >= row[5]
+    assert row[6:] == ("post_message", 2)
+    assert "body" not in columns
+    assert "token" not in columns
+
+
+def test_cf_connecting_ip_has_priority_over_forwarded_and_socket_addresses(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(messages, "DB_PATH", tmp_path / "members.sqlite3")
+
+    async def app(scope, receive, send):
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = BearerRoleMiddleware(app, {"backend": "backend-secret"})
+    invoke_middleware(
+        middleware,
+        authorization="Bearer backend-secret",
+        forwarded_headers={
+            "Cf-Connecting-Ip": "203.0.113.9",
+            "X-Forwarded-For": "198.51.100.3, 10.0.0.2",
+        },
+        client=("127.0.0.8", 12345),
+    )
+
+    with sqlite3.connect(messages.DB_PATH) as connection:
+        last_ip = connection.execute(
+            "SELECT last_ip FROM members WHERE role = 'backend'"
+        ).fetchone()[0]
+    assert last_ip == "203.0.113.9"
 
 
 def test_post_message_uses_authenticated_role_instead_of_client_from_role(monkeypatch):

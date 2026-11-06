@@ -23,6 +23,15 @@ Every message has: id, from_role, to_role, type, body, contract_version, created
 - Update README.md if a decision changes.
 - To ask for or change something, post a proposal. Reply to it with objection or accept using its proposal_id. Don't send loose requests.
 
+## TeamBrain workflow (always follow)
+- At the start of every task: call check_inbox, then get_thread for each proposal_id you were sent.
+- Reply in the thread with objection or accept, using proposal_id.
+- Before changing anything shared (API shape, schema), post a proposal and wait.
+- Do the work the accepted proposal requires, then mark_read what you handled.
+- Never edit code that contradicts the current contract.
+- Breaking contract changes need a human accept.
+- If a thread has 6 messages, stop and say a human is needed.
+
 ## Structure
 - /server: MCP server
 - /tests: tests

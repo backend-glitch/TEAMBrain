@@ -20,6 +20,7 @@ def test_create_tables_creates_contracts_and_messages():
             "team_status",
             "status_history",
             "work_log",
+            "members",
         }.issubset(tables)
 
         contract_columns = {
@@ -41,6 +42,22 @@ def test_create_tables_creates_contracts_and_messages():
             "status",
             "decision_note",
             "created_at",
+        }
+        member_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(members)")
+        }
+        assert member_columns == {
+            "role",
+            "ai_name",
+            "person_name",
+            "machine_label",
+            "client_name",
+            "client_version",
+            "last_ip",
+            "first_seen",
+            "last_seen",
+            "last_tool",
+            "request_count",
         }
     finally:
         connection.close()

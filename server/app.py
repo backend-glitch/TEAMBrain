@@ -24,11 +24,13 @@ from server.messages import (
 )
 from server.http_auth import BearerRoleMiddleware, configured_tokens, current_role
 from server.http_security import transport_security_settings
+from server.members import set_profile as update_profile
 from server.dashboard import (
     dashboard_api,
     dashboard_login,
     dashboard_logout,
     dashboard_page,
+    dashboard_update_member,
 )
 
 mcp = MCPServer("TeamBrain")
@@ -129,6 +131,17 @@ def get_team_status_tool() -> dict[str, list[dict[str, object]]]:
     return get_team_status()
 
 
+def set_profile_tool(
+    ai_name: str, person_name: str, machine_label: str
+) -> dict[str, str | bool]:
+    """Set the profile for the role authenticated by the caller's token."""
+    role = current_role.get()
+    if role is None:
+        raise PermissionError("set_profile requires an authenticated role token")
+    update_profile(role, ai_name, person_name, machine_label)
+    return {"role": role, "updated": True}
+
+
 def mark_read_tool(message_ids: list[str]) -> dict[str, list[str]]:
     """Mark only messages addressed to the authenticated role as read."""
     authenticated_role = current_role.get()
@@ -142,6 +155,7 @@ mcp.tool(name="check_inbox")(check_inbox_tool)
 mcp.tool(name="set_status")(set_status_tool)
 mcp.tool(name="log_work")(log_work_tool)
 mcp.tool(name="get_team_status")(get_team_status_tool)
+mcp.tool(name="set_profile")(set_profile_tool)
 mcp.tool()(get_thread)
 mcp.tool()(list_escalated)
 mcp.tool()(human_decision)
@@ -151,7 +165,7 @@ mcp.tool()(write_contract)
 
 
 def create_http_app():
-    """Build the authenticated Streamable HTTP app with read-only dashboard routes."""
+    """Build the authenticated Streamable HTTP app and protected dashboard routes."""
     app = mcp.streamable_http_app(
         host="127.0.0.1",
         streamable_http_path="/mcp",
@@ -159,6 +173,7 @@ def create_http_app():
     )
     app.add_route("/dashboard", dashboard_page, methods=["GET"])
     app.add_route("/api/dashboard", dashboard_api, methods=["GET"])
+    app.add_route("/api/members/{role}", dashboard_update_member, methods=["POST"])
     app.add_route("/api/login", dashboard_login, methods=["POST"])
     app.add_route("/api/logout", dashboard_logout, methods=["POST"])
     app.add_middleware(

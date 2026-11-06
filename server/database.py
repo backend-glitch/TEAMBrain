@@ -71,6 +71,23 @@ def create_tables(connection: sqlite3.Connection) -> None:
         """
     )
     connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS members (
+            role TEXT PRIMARY KEY CHECK (role IN ('uiux', 'frontend', 'backend')),
+            ai_name TEXT,
+            person_name TEXT,
+            machine_label TEXT,
+            client_name TEXT,
+            client_version TEXT,
+            last_ip TEXT,
+            first_seen TEXT,
+            last_seen TEXT,
+            last_tool TEXT,
+            request_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_status_history_role_created "
         "ON status_history(role, created_at DESC)"
     )

@@ -1,6 +1,7 @@
 """Bearer token authentication for TeamBrain's HTTP transport."""
 
 import hmac
+import json
 import os
 from contextvars import ContextVar
 from starlette.responses import PlainTextResponse
@@ -14,6 +15,34 @@ TOKEN_ENV_BY_ROLE = {
     "frontend": "TEAMBRAIN_TOKEN_FRONTEND",
     "backend": "TEAMBRAIN_TOKEN_BACKEND",
 }
+MAX_METADATA_BODY_SIZE = 256 * 1024
+
+
+def _mcp_request_metadata(body: bytes) -> tuple[str | None, str | None, str | None]:
+    """Extract only protocol identity and tool name metadata from JSON-RPC."""
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, None, None
+    entries = payload if isinstance(payload, list) else [payload]
+    client_name = client_version = last_tool = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        params = entry.get("params")
+        if not isinstance(params, dict):
+            continue
+        if entry.get("method") == "initialize":
+            client_info = params.get("clientInfo")
+            if isinstance(client_info, dict):
+                name, version = client_info.get("name"), client_info.get("version")
+                client_name = name[:100] if isinstance(name, str) else client_name
+                client_version = version[:100] if isinstance(version, str) else client_version
+        elif entry.get("method") == "tools/call":
+            name = params.get("name")
+            if isinstance(name, str) and name:
+                last_tool = name[:100]
+    return client_name, client_version, last_tool
 
 
 def configured_tokens() -> dict[str, str]:
@@ -65,7 +94,7 @@ class BearerRoleMiddleware:
                 )
                 return
 
-        if path in self.DASHBOARD_PATHS:
+        if path in self.DASHBOARD_PATHS or path.startswith("/api/members/"):
             await self.app(scope, receive, send)
             return
 
@@ -84,8 +113,56 @@ class BearerRoleMiddleware:
             return
 
         token = current_role.set(role)
+        request_body = bytearray()
+        metadata_body_too_large = False
+        request_headers = {key.lower(): value for key, value in scope["headers"]}
+        forwarded = request_headers.get(b"cf-connecting-ip", b"").decode(
+            "latin-1"
+        ).strip()
+        if not forwarded:
+            forwarded = request_headers.get(b"x-forwarded-for", b"").decode(
+                "latin-1"
+            ).split(",", 1)[0].strip()
+        socket_address = scope.get("client")
+        last_ip = forwarded or (socket_address[0] if socket_address else None)
+        is_mcp_request = path == "/mcp"
+        if is_mcp_request:
+            from server.members import upsert_authenticated_request
+
+            upsert_authenticated_request(role, last_ip=last_ip)
+
+        async def capture_receive():
+            nonlocal metadata_body_too_large
+            message = await receive()
+            if message.get("type") == "http.request":
+                chunk = message.get("body", b"")
+                if len(request_body) + len(chunk) <= MAX_METADATA_BODY_SIZE:
+                    request_body.extend(chunk)
+                else:
+                    request_body.clear()
+                    metadata_body_too_large = True
+                if is_mcp_request and not message.get("more_body", False):
+                    metadata = (
+                        (None, None, None)
+                        if metadata_body_too_large
+                        else _mcp_request_metadata(bytes(request_body))
+                    )
+                    client_name, client_version, last_tool = metadata
+                    if client_name or client_version or last_tool:
+                        from server.members import upsert_authenticated_request
+
+                        upsert_authenticated_request(
+                            role,
+                            last_ip=None,
+                            last_tool=last_tool,
+                            client_name=client_name,
+                            client_version=client_version,
+                            count_request=False,
+                        )
+            return message
+
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, capture_receive, send)
         finally:
             current_role.reset(token)
 

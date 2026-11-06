@@ -173,6 +173,68 @@ def test_script_message_is_data_and_page_uses_text_content(dashboard_client):
     assert "localStorage" not in page
 
 
+def test_dashboard_member_profile_is_rendered_as_text_and_edit_requires_session(
+    dashboard_client
+):
+    client, _, _ = dashboard_client
+    malicious_name = "<img src=x onerror=alert(1)>"
+    dashboard.dashboard_payload()["members"] = [{
+        "role": "frontend",
+        "ai_name": malicious_name,
+        "person_name": "Alex",
+        "machine_label": "Workstation",
+        "client_name": "Cursor",
+        "client_version": "1.0",
+        "last_ip": "127.0.0.1",
+        "first_seen": None,
+        "last_seen": None,
+        "last_tool": "set_profile",
+        "request_count": 1,
+        "messages_sent": 0,
+    }]
+    assert client.post(
+        "/api/members/frontend",
+        json={"ai_name": "Nova", "person_name": "Alex", "machine_label": "PC"},
+        headers={"Origin": ORIGIN},
+    ).status_code == 401
+    assert client.post(
+        "/api/members/frontend",
+        json={"ai_name": "Nova", "person_name": "Alex", "machine_label": "PC"},
+        headers={
+            "Origin": ORIGIN,
+            "Authorization": "Bearer frontend-role-token",
+        },
+    ).status_code == 401
+
+    assert login(client).status_code == 200
+    page = client.get("/dashboard").text
+    payload = client.get("/api/dashboard").json()
+    assert payload["members"][0]["ai_name"] == malicious_name
+    assert "textContent" in page
+    assert ".innerHTML" not in page
+    assert malicious_name not in page
+
+    rejected = client.post(
+        "/api/members/frontend",
+        json={"ai_name": "Nova", "person_name": "Alex", "machine_label": "PC"},
+        headers={"Origin": "https://attacker.example"},
+    )
+    assert rejected.status_code == 403
+
+    accepted = client.post(
+        "/api/members/frontend",
+        json={"ai_name": "Nova", "person_name": "Alex", "machine_label": "PC"},
+        headers={"Origin": ORIGIN},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json() == {
+        "role": "frontend",
+        "ai_name": "Nova",
+        "person_name": "Alex",
+        "machine_label": "PC",
+    }
+
+
 def test_dashboard_session_does_not_authenticate_mcp_route(dashboard_client):
     client, _, _ = dashboard_client
     assert login(client).status_code == 200

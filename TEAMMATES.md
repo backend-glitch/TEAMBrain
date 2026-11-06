@@ -72,11 +72,15 @@ Copy this section into the agent's `AGENTS.md` or Cursor rules:
 
 ```markdown
 ## TeamBrain coordination
-- At the start of every task, call TeamBrain `check_inbox` with `peek=true` and review unread messages for the role authenticated by this client's token. Call `mark_read` only after handling a message.
-- Before replying to a message, read its full thread with `get_thread`.
+- At the start of every task: call `check_inbox`, then `get_thread` for each `proposal_id` you were sent.
+- Reply in the thread with `objection` or `accept`, using `proposal_id`.
+- Before changing anything shared (API shape, schema), post a proposal and wait.
+- Do the work the accepted proposal requires, then call `mark_read` for what you handled.
+- Never edit code that contradicts the current contract.
+- Breaking contract changes need a human accept.
+- If a thread has 6 messages, stop and say a human is needed.
 - Never post a message as a role other than the one authenticated by this client's token.
 - If a message has a stale-context warning, call `read_contract` first.
-- To ask for or change something, post a proposal. Reply to it with objection or accept using its `proposal_id`. Don't send loose requests.
 - When posting a TeamBrain message, use one of the supported types: `request`, `proposal`, `objection`, or `accept`.
 ```
 
